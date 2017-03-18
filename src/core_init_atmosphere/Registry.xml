@@ -145,6 +145,12 @@
                         <var name="cellsOnVertex"/>
                         <var name="kiteAreasOnVertex"/>
                         <var name="meshDensity"/>
+                        <var name="isGhostCell"/>
+                        <var name="isGhostEdge"/>
+                        <var name="isGhostVertex"/>
+                        <var name="symmetricCell"/>
+                        <var name="symmetricEdge"/>
+                        <var name="symmetricVertex"/>
                         <var name="edgeNormalVectors" packages="vertical_stage_in;met_stage_in"/>
                         <var name="localVerticalUnitVectors" packages="vertical_stage_in;met_stage_in"/>
                         <var name="cellTangentPlane" packages="vertical_stage_in;met_stage_in"/>
@@ -239,6 +245,12 @@
                         <var name="cellsOnVertex"/>
                         <var name="kiteAreasOnVertex"/>
                         <var name="meshDensity"/>
+                        <var name="isGhostCell"/>
+                        <var name="isGhostEdge"/>
+                        <var name="isGhostVertex"/>
+                        <var name="symmetricCell"/>
+                        <var name="symmetricEdge"/>
+                        <var name="symmetricVertex"/>
                         <var name="edgeNormalVectors"/>
                         <var name="localVerticalUnitVectors"/>
                         <var name="cellTangentPlane"/>
@@ -402,6 +414,12 @@
                 <var name="fEdge"                        type="real"     dimensions="nEdges"/>
                 <var name="fVertex"                      type="real"     dimensions="nVertices"/>
                 <var name="meshDensity"                  type="real"     dimensions="nCells"/>
+                <var name="isGhostCell"                  type="integer"  dimensions="nCells"/>
+                <var name="isGhostEdge"                  type="integer"  dimensions="nEdges"/>
+                <var name="isGhostVertex"                type="integer"  dimensions="nVertices"/>
+                <var name="symmetricCell"                type="integer"  dimensions="nCells"/>
+                <var name="symmetricEdge"                type="integer"  dimensions="nEdges"/>
+                <var name="symmetricVertex"              type="integer"  dimensions="nVertices"/>
 
                 <!-- coefficients for vertical extrapolation to the surface -->
                 <var name="cf1"                          type="real"     dimensions=""/>

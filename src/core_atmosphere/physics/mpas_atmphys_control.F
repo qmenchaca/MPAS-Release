@@ -121,7 +121,6 @@
     call physics_error_fatal(mpas_err_message)
 
  end if
- 
 
 !cloud microphysics scheme:
  if(.not. (config_microp_scheme .eq. 'off'      .or. &

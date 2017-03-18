@@ -1022,7 +1022,6 @@ module mpas_timekeeping
          call ESMF_TimeSet(curr_time % t, YY=year, MM=month, DD=day, H=hour, M=min, S=sec, Sn=numerator, Sd=denominator, rc=ierr)
 
       else
-      
          if (present(DoY)) then
             call mpas_get_month_day(YYYY, DoY, month, day)
          

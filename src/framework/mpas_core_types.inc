@@ -109,6 +109,14 @@
    end interface
 
    abstract interface
+      function mpas_core_dfi_function(domain) result(iErr)
+         import domain_type
+         type (domain_type), intent(inout) :: domain
+         integer :: iErr
+      end function
+   end interface
+
+   abstract interface
       function mpas_core_finalize_function(domain) result(iErr)
          import domain_type
          type (domain_type), intent(inout) :: domain
@@ -131,6 +139,7 @@
       ! Core init, run, and finalize function pointers
       procedure (mpas_core_init_function), pointer, nopass :: core_init => null()
       procedure (mpas_core_run_function), pointer, nopass :: core_run => null()
+      procedure (mpas_core_dfi_function), pointer, nopass :: core_dfi => null()
       procedure (mpas_core_finalize_function), pointer, nopass :: core_finalize => null()
 
       ! Core framework function pointers

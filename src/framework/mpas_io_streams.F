@@ -3079,6 +3079,7 @@ module mpas_io_streams
       field_cursor => stream % fieldList
       do while (associated(field_cursor))
 
+
          if (field_cursor % field_type == FIELD_0D_INT) then
 
 !write(stderrUnit,*) 'Writing out field '//trim(field_cursor % int0dField % fieldName)

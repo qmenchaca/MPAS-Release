@@ -26,13 +26,14 @@ module init_atm_core_interface
    subroutine init_atm_setup_core(core)
 
       use mpas_derived_types, only : core_type
-      use init_atm_core, only : init_atm_core_init, init_atm_core_run, init_atm_core_finalize
+      use init_atm_core, only : init_atm_core_init, init_atm_core_run, init_atm_core_dfi, init_atm_core_finalize
 
       implicit none
 
       type (core_type), pointer :: core
 
       core % core_init => init_atm_core_init
+      core % core_dfi => init_atm_core_dfi
       core % core_run => init_atm_core_run
       core % core_finalize => init_atm_core_finalize
       core % define_packages => init_atm_define_packages

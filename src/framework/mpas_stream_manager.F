@@ -78,6 +78,9 @@ module mpas_stream_manager
     type (field2DInteger), pointer :: edgesOnEdge_save
     type (field2DInteger), pointer :: cellsOnVertex_save
     type (field2DInteger), pointer :: edgesOnVertex_save
+    type (field1DInteger), pointer :: symmetricCell_save
+    type (field1DInteger), pointer :: symmetricEdge_save
+    type (field1DInteger), pointer :: symmetricVertex_save
 
 
     contains
@@ -4085,6 +4088,7 @@ module mpas_stream_manager
         integer, pointer :: maxEdges, maxEdges2, nEdgesSolve, nCellsSolve, nVerticesSolve
 
         type (field1dInteger), pointer :: nEdgesOnCell, nEdgesOnEdge, indexToCellID, indexToEdgeID, indexToVertexID
+        type (field1dInteger), pointer :: isGhostCell,isGhostEdge,isGhostVertex
 
         type (field2dInteger), pointer :: cellsOnCell_ptr, edgesOnCell_ptr, verticesOnCell_ptr, &
                                  cellsOnEdge_ptr, verticesOnEdge_ptr, edgesOnEdge_ptr, &
@@ -4094,8 +4098,12 @@ module mpas_stream_manager
                                  cellsOnEdge, verticesOnEdge, edgesOnEdge, &
                                  cellsOnVertex, edgesOnVertex
 
+        type (field1dInteger), pointer :: symmetricCell_ptr, symmetricEdge_ptr, symmetricVertex_ptr
+        type (field1dInteger), pointer :: symmetricCell, symmetricEdge, symmetricVertex
+
         logical :: handle_cellsOnCell, handle_edgesOnCell, handle_verticesOnCell, handle_cellsOnEdge, handle_verticesOnEdge, &
-                   handle_edgesOnEdge, handle_cellsOnVertex, handle_edgesOnVertex
+                   handle_edgesOnEdge, handle_cellsOnVertex, handle_edgesOnVertex &
+		  ,handle_symmetricCell,handle_symmetricEdge,handle_symmetricVertex
 
         integer :: i, j
 
@@ -4108,6 +4116,9 @@ module mpas_stream_manager
         nullify(edgesOnEdge_save)
         nullify(cellsOnVertex_save)
         nullify(edgesOnVertex_save)
+        nullify(symmetricCell_save)
+        nullify(symmetricEdge_save)
+        nullify(symmetricVertex_save)
 
         nullify(cellsOnCell)
         nullify(edgesOnCell)
@@ -4117,6 +4128,9 @@ module mpas_stream_manager
         nullify(edgesOnEdge)
         nullify(cellsOnVertex)
         nullify(edgesOnVertex)
+        nullify(symmetricCell)
+        nullify(symmetricEdge)
+        nullify(symmetricVertex)
 
         !
         ! Determine which connectivity fields exist in this stream
@@ -4160,6 +4174,18 @@ module mpas_stream_manager
                     allocate(edgesOnVertex_save)
                     edgesOnVertex_ptr => edgesOnVertex_save
                     call mpas_pool_get_field(allFields, 'edgesOnVertex', edgesOnVertex)
+                else if (trim(fieldItr % memberName) == 'symmetricCell') then
+                    allocate(symmetricCell_save)
+                    symmetricCell_ptr => symmetricCell_save
+                    call mpas_pool_get_field(allFields, 'symmetricCell', symmetricCell)
+                else if (trim(fieldItr % memberName) == 'symmetricEdge') then
+                    allocate(symmetricEdge_save)
+                    symmetricEdge_ptr => symmetricEdge_save
+                    call mpas_pool_get_field(allFields, 'symmetricEdge', symmetricEdge)
+                else if (trim(fieldItr % memberName) == 'symmetricVertex') then
+                    allocate(symmetricVertex_save)
+                    symmetricVertex_ptr => symmetricVertex_save
+                    call mpas_pool_get_field(allFields, 'symmetricVertex', symmetricVertex)
                 end if
             end if
 
@@ -4173,6 +4199,9 @@ module mpas_stream_manager
         call mpas_pool_get_field(allFields, 'indexToCellID', indexToCellID)
         call mpas_pool_get_field(allFields, 'indexToEdgeID', indexToEdgeID)
         call mpas_pool_get_field(allFields, 'indexToVertexID', indexToVertexID)
+        call mpas_pool_get_field(allFields, 'isGhostCell', isGhostCell)
+        call mpas_pool_get_field(allFields, 'isGhostEdge', isGhostEdge)
+        call mpas_pool_get_field(allFields, 'isGhostVertex', isGhostVertex)
 
         do while (associated(indexToCellID))
 
@@ -4336,6 +4365,66 @@ module mpas_stream_manager
                 nullify(edgesOnVertex_ptr % next)
             end if
 
+            if (associated(symmetricCell)) then
+                symmetricCell_ptr % array => symmetricCell % array
+                allocate(symmetricCell % array(nCells+1))
+
+                do i = 1, nCellsSolve
+		    if(isGhostCell % array(i) == 1) then
+                        symmetricCell % array(i) = indexToCellID % array(symmetricCell_ptr % array(i))
+		    else
+                        symmetricCell % array(i) = 0
+		    end if
+                end do
+
+                symmetricCell => symmetricCell % next
+                if (associated(symmetricCell)) then
+                    allocate(symmetricCell_ptr % next)
+                    symmetricCell_ptr => symmetricCell_ptr % next
+                end if
+                nullify(symmetricCell_ptr % next)
+            end if
+
+            if (associated(symmetricEdge)) then
+                symmetricEdge_ptr % array => symmetricEdge % array
+                allocate(symmetricEdge % array(nEdges+1))
+
+                do i = 1, nEdgesSolve
+		    if(isGhostEdge % array(i) == 1) then
+                        symmetricEdge % array(i) = indexToEdgeID % array(symmetricEdge_ptr % array(i))
+		    else
+                        symmetricEdge % array(i) = 0
+		    end if
+                end do
+
+                symmetricEdge => symmetricEdge % next
+                if (associated(symmetricEdge)) then
+                    allocate(symmetricEdge_ptr % next)
+                    symmetricEdge_ptr => symmetricEdge_ptr % next
+                end if
+                nullify(symmetricEdge_ptr % next)
+            end if
+
+            if (associated(symmetricVertex)) then
+                symmetricVertex_ptr % array => symmetricVertex % array
+                allocate(symmetricVertex % array(nVertices+1))
+
+                do i = 1, nVerticesSolve
+		    if(isGhostVertex % array(i) == 1) then
+                        symmetricVertex % array(i) = indexToVertexID % array(symmetricVertex_ptr % array(i))
+		    else
+                        symmetricVertex % array(i) = 0
+		    end if
+                end do
+
+                symmetricVertex => symmetricVertex % next
+                if (associated(symmetricVertex)) then
+                    allocate(symmetricVertex_ptr % next)
+                    symmetricVertex_ptr => symmetricVertex_ptr % next
+                end if
+                nullify(symmetricVertex_ptr % next)
+            end if
+
             nEdgesOnCell => nEdgesOnCell % next
             nEdgesOnEdge => nEdgesOnEdge % next
             indexToCellID => indexToCellID % next
@@ -4380,6 +4469,9 @@ module mpas_stream_manager
                                  cellsOnEdge, verticesOnEdge, edgesOnEdge, &
                                  cellsOnVertex, edgesOnVertex
 
+        type (field1dInteger), pointer :: symmetricCell_ptr,symmetricEdge_ptr,symmetricVertex_ptr
+        type (field1dInteger), pointer :: symmetricCell,symmetricEdge,symmetricVertex
+
         integer :: i, j
 
 
@@ -4391,6 +4483,9 @@ module mpas_stream_manager
         nullify(edgesOnEdge)
         nullify(cellsOnVertex)
         nullify(edgesOnVertex)
+        nullify(symmetricCell)
+        nullify(symmetricEdge)
+        nullify(symmetricVertex)
 
         if (associated(cellsOnCell_save)) then
             cellsOnCell_ptr => cellsOnCell_save
@@ -4423,6 +4518,18 @@ module mpas_stream_manager
         if (associated(edgesOnVertex_save)) then
             edgesOnVertex_ptr => edgesOnVertex_save
             call mpas_pool_get_field(allFields, 'edgesOnVertex', edgesOnVertex)
+        end if 
+        if (associated(symmetricCell_save)) then
+            symmetricCell_ptr => symmetricCell_save
+            call mpas_pool_get_field(allFields, 'symmetricCell', symmetricCell)
+        end if 
+        if (associated(symmetricEdge_save)) then
+            symmetricEdge_ptr => symmetricEdge_save
+            call mpas_pool_get_field(allFields, 'symmetricEdge', symmetricEdge)
+        end if 
+        if (associated(symmetricVertex_save)) then
+            symmetricVertex_ptr => symmetricVertex_save
+            call mpas_pool_get_field(allFields, 'symmetricVertex', symmetricVertex)
         end if 
 
         !
@@ -4495,6 +4602,31 @@ module mpas_stream_manager
                 edgesOnVertex => edgesOnVertex % next
             end if
 
+            if (associated(symmetricCell)) then
+                deallocate(symmetricCell % array)
+                symmetricCell % array => symmetricCell_ptr % array
+                nullify(symmetricCell_ptr % array)
+                symmetricCell_ptr => symmetricCell_ptr % next
+                symmetricCell => symmetricCell % next
+            end if
+
+            if (associated(symmetricEdge)) then
+                deallocate(symmetricEdge % array)
+                symmetricEdge % array => symmetricEdge_ptr % array
+                nullify(symmetricEdge_ptr % array)
+                symmetricEdge_ptr => symmetricEdge_ptr % next
+                symmetricEdge => symmetricEdge % next
+            end if
+
+            if (associated(symmetricVertex)) then
+                deallocate(symmetricVertex % array)
+                symmetricVertex % array => symmetricVertex_ptr % array
+                nullify(symmetricVertex_ptr % array)
+                symmetricVertex_ptr => symmetricVertex_ptr % next
+                symmetricVertex => symmetricVertex % next
+            end if
+
+
             indexToCellID => indexToCellID % next
         end do
 
@@ -4506,6 +4638,9 @@ module mpas_stream_manager
         if (associated(edgesOnEdge_save))    call mpas_deallocate_field(edgesOnEdge_save)
         if (associated(cellsOnVertex_save))  call mpas_deallocate_field(cellsOnVertex_save)
         if (associated(edgesOnVertex_save))  call mpas_deallocate_field(edgesOnVertex_save)
+        if (associated(symmetricCell_save))  call mpas_deallocate_field(symmetricCell_save)
+        if (associated(symmetricEdge_save))  call mpas_deallocate_field(symmetricEdge_save)
+        if (associated(symmetricVertex_save))  call mpas_deallocate_field(symmetricVertex_save)
 
         nullify(cellsOnCell_save)
         nullify(edgesOnCell_save)
@@ -4515,6 +4650,9 @@ module mpas_stream_manager
         nullify(edgesOnEdge_save)
         nullify(cellsOnVertex_save)
         nullify(edgesOnVertex_save)
+        nullify(symmetricCell_save)
+        nullify(symmetricEdge_save)
+        nullify(symmetricVertex_save)
 
     end subroutine postwrite_reindex !}}}
 
@@ -4544,12 +4682,13 @@ module mpas_stream_manager
 
         type (field1DInteger), pointer :: indexToCellID, indexToVertexID, indexToEdgeID, nEdgesOnCell, cursor
         type (field2DInteger), pointer :: int2DField
+        type (field1DInteger), pointer :: int1DField
 !TODO: Use a short string kind here?
         character(len=32) :: outDimName, indexSpaceName
         integer, dimension(:,:), pointer :: sortedID
         integer :: innerDim
         integer, pointer :: outerDim, indexSpaceDim
-        logical :: skip_field
+        logical :: skip_field, TwoDField
         integer :: i, j, k
 
 
@@ -4583,6 +4722,8 @@ module mpas_stream_manager
                     ! Get pointer to appropriate global index field
                     cursor => indexToCellID
 
+		    TwoDField = .true.
+
                 else if (trim(fieldItr % memberName) == 'edgesOnCell') then
 
                     STREAM_DEBUG_WRITE('-- Reindexing edgesOnCell')
@@ -4598,6 +4739,8 @@ module mpas_stream_manager
 
                     ! Get pointer to appropriate global index field
                     cursor => indexToEdgeID
+
+		    TwoDField = .true.
 
                 else if (trim(fieldItr % memberName) == 'verticesOnCell') then
 
@@ -4615,6 +4758,8 @@ module mpas_stream_manager
                     ! Get pointer to appropriate global index field
                     cursor => indexToVertexID
 
+		    TwoDField = .true.
+
                 else if (trim(fieldItr % memberName) == 'cellsOnEdge') then
 
                     STREAM_DEBUG_WRITE('-- Reindexing cellsOnEdge')
@@ -4630,6 +4775,8 @@ module mpas_stream_manager
 
                     ! Get pointer to appropriate global index field
                     cursor => indexToCellID
+
+		    TwoDField = .true.
 
                 else if (trim(fieldItr % memberName) == 'verticesOnEdge') then
 
@@ -4647,6 +4794,8 @@ module mpas_stream_manager
                     ! Get pointer to appropriate global index field
                     cursor => indexToVertexID
 
+		    TwoDField = .true.
+
                 else if (trim(fieldItr % memberName) == 'edgesOnEdge') then
 
                     STREAM_DEBUG_WRITE('-- Reindexing edgesOnEdge')
@@ -4662,6 +4811,8 @@ module mpas_stream_manager
 
                     ! Get pointer to appropriate global index field
                     cursor => indexToEdgeID
+
+		    TwoDField = .true.
 
                 else if (trim(fieldItr % memberName) == 'cellsOnVertex') then
 
@@ -4679,6 +4830,8 @@ module mpas_stream_manager
                     ! Get pointer to appropriate global index field
                     cursor => indexToCellID
 
+		    TwoDField = .true.
+
                 else if (trim(fieldItr % memberName) == 'edgesOnVertex') then
 
                     STREAM_DEBUG_WRITE('-- Reindexing edgesOnVertex')
@@ -4695,11 +4848,60 @@ module mpas_stream_manager
                     ! Get pointer to appropriate global index field
                     cursor => indexToEdgeID
 
+		    TwoDField = .true.
+
+                else if (trim(fieldItr % memberName) == 'symmetricCell') then
+
+                    STREAM_DEBUG_WRITE('-- Reindexing symmetricCell')
+
+                    ! Get pointer to the field to be reindexed
+                    call mpas_pool_get_field(allFields, 'symmetricCell', int1DField)
+
+                    ! Set the name of the dimension of the space within which we are indexing dimension
+                    indexSpaceName = 'nCells'
+
+                    ! Get pointer to appropriate global index field
+                    cursor => indexToCellID
+
+		    TwoDField = .false.
+
+                else if (trim(fieldItr % memberName) == 'symmetricEdge') then
+
+                    STREAM_DEBUG_WRITE('-- Reindexing symmetricEdge')
+
+                    ! Get pointer to the field to be reindexed
+                    call mpas_pool_get_field(allFields, 'symmetricEdge', int1DField)
+
+                    ! Set the name of the dimension of the space within which we are indexing dimension
+                    indexSpaceName = 'nEdges'
+
+                    ! Get pointer to appropriate global index field
+                    cursor => indexToEdgeID
+
+		    TwoDField = .false.
+
+                else if (trim(fieldItr % memberName) == 'symmetricVertex') then
+
+                    STREAM_DEBUG_WRITE('-- Reindexing symmetricVertex')
+
+                    ! Get pointer to the field to be reindexed
+                    call mpas_pool_get_field(allFields, 'symmetricVertex', int1DField)
+
+                    ! Set the name of the dimension of the space within which we are indexing dimension
+                    indexSpaceName = 'nVertices'
+
+                    ! Get pointer to appropriate global index field
+                    cursor => indexToVertexID
+
+		    TwoDField = .false.
+
                 else
                     skip_field = .true.
                 end if
 
                 if (.not. skip_field) then
+
+		  if(TwoDField) then
 
                     ! Get inner dimension of field to be reindexed (assumed to be block invariant)
                     innerDim = int2DField % dimSizes(1)
@@ -4736,6 +4938,40 @@ module mpas_stream_manager
                         cursor => cursor % next
 
                     end do
+
+		  else ! This is just a 1D field (symmetricX)
+
+                    ! Reindex all blocks for the field
+                    do while (associated(int1DField))
+
+                        ! Get outer dimension of field for this block
+                        call mpas_pool_get_dimension(cursor % block % dimensions, trim(indexSpaceName), indexSpaceDim)
+
+                        ! Set-up reindexing map
+                        allocate(sortedID(2,indexSpaceDim))
+                        do i = 1, indexSpaceDim
+                            sortedID(1,i) = cursor % array(i)
+                            sortedID(2,i) = i
+                        end do
+                        call mpas_quicksort(indexSpaceDim, sortedID)
+
+                        ! Reindex the field
+                        do i = 1, indexSpaceDim
+                                k = mpas_binary_search(sortedID, 2, 1, indexSpaceDim, int1DField % array(i))
+                                if (k <= indexSpaceDim) then
+                                    int1DField % array(i) = sortedID(2,k)
+                                else
+                                    int1DField % array(i) = indexSpaceDim + 1
+                                end if
+                        end do
+
+                        deallocate(sortedID)
+                        int1DField => int1DField % next
+                        cursor => cursor % next
+
+                    end do
+
+		  end if
 
                 end if
 

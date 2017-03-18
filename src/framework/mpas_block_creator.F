@@ -1338,6 +1338,9 @@ module mpas_block_creator
      integer, dimension(:,:), pointer :: edgesOnCell, edgesOnVertex, edgesOnEdge
      integer, dimension(:,:), pointer :: verticesOnCell, verticesOnEdge
 
+     integer, dimension(:), pointer :: isGhostCell, isGhostVertex, isGhostEdge
+     integer, dimension(:), pointer :: symmetricCell, symmetricVertex, symmetricEdge
+
      ! Loop over blocks
      block_ptr => blocklist
      do while(associated(block_ptr))
@@ -1359,6 +1362,9 @@ module mpas_block_creator
        call mpas_pool_get_array(block_ptr % allFields, 'verticesOnCell', verticesOnCell)
        call mpas_pool_get_array(block_ptr % allFields, 'verticesOnEdge', verticesOnEdge)
        call mpas_pool_get_array(block_ptr % allFields, 'edgesOnEdge', edgesOnEdge)
+       call mpas_pool_get_array(block_ptr % allFields, 'symmetricCell', symmetricCell)
+       call mpas_pool_get_array(block_ptr % allFields, 'symmetricEdge', symmetricEdge)
+       call mpas_pool_get_array(block_ptr % allFields, 'symmetricVertex', symmetricVertex)
 
        !
        ! Rename vertices in cellsOnCell, edgesOnCell, etc. to local indices
@@ -1384,6 +1390,68 @@ module mpas_block_creator
          vertexIDSorted(2,i) = i
        end do
        call mpas_quicksort(nVertices, vertexIDSorted)
+
+
+       !
+       ! Transform isGhostX and symmetricX from global to local indices
+       ! Assuming xIDSorted is sorted according to global index
+       !
+
+       do i=1,nCells
+!		write(0,*) 'Within the cell loop'
+!		write(0,*) 'Global and Local index ', i, cellIDSorted(1,i),cellIDSorted(2,i)
+!		write(0,*) 'LOCAL ghost ', isGhostCell(i)
+	 if(isGhostCell(i) == 1) then
+	   ! Find location of symmetric cell in "local" space
+	   k = mpas_binary_search(cellIDSorted, 2, 1, nCells, &
+				  symmetricCell(i))
+	   ! The search returns a value <= nCells if successful, and nCells+1 otherwise
+!		write(0,*) 'symCell before assignment ', symmetricCell(i), k
+	   if(k <= nCells) then
+	      symmetricCell(i) = cellIDSorted(2,k)
+	   else
+	      symmetricCell(i) = nCells+1
+	   end if
+!		write(0,*) 'symCell after assignment ', symmetricCell(i)
+	 end if ! End search for ghost cells
+       end do
+
+       do i=1,nEdges
+!		write(0,*) 'Within the edge loop'
+!		write(0,*) 'Global and Local index ', i, edgeIDSorted(1,i),edgeIDSorted(2,i)
+!		write(0,*) 'LOCAL ghost ', isGhostEdge(i)
+	 if(isGhostEdge(i) == 1) then
+	   ! Find location of symmetric edge in "local" space
+	   k = mpas_binary_search(edgeIDSorted, 2, 1, nEdges, &
+				  symmetricEdge(i))
+	   ! The search returns a value <= nEdges if successful, and nEdges+1 otherwise
+!		write(0,*) 'symEdge before assignment ', symmetricEdge(i), k
+	   if(k <= nEdges) then
+	      symmetricEdge(i) = edgeIDSorted(2,k)
+	   else
+	      symmetricEdge(i) = nEdges+1
+	   end if
+!		write(0,*) 'symEdge after assignment ', symmetricEdge(i)
+	 end if ! End search for ghost edges
+       end do
+
+       do i=1,nVertices
+	 if(isGhostVertex(i) == 1) then
+	   ! Find location of symmetric vertex in "local" space
+	   k = mpas_binary_search(vertexIDSorted, 2, 1, nVertices, &
+				  symmetricVertex(i))
+	   ! The search returns a value <= nVertices if successful, and nVertices+1 otherwise
+	   if(k <= nVertices) then
+	      symmetricVertex(i) = vertexIDSorted(2,k)
+	   else
+	      symmetricVertex(i) = nVertices+1
+	   end if
+	 end if ! End search for ghost vertexs
+       end do
+
+       !
+       ! End isGhostX and symmetricX global/local index transformation
+       !
  
  
        do i = 1, nCells

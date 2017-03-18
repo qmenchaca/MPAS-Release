@@ -26,6 +26,7 @@
                 <dim name="nAerLevels"         definition="namelist:naerlev"/>
                 <dim name="cam_dim1"           definition="namelist:camdim1"/>
                 <dim name="nVertLevelsP2"      definition="nVertLevels+2"/>
+                <dim name="dfi_time"           definition="namelist:dfi_time_dim"/>
         </dims>
 
 
@@ -76,6 +77,16 @@
         <nml_record name="damping" in_defaults="true">
                 <nml_option name="config_zd"                         type="real"          default_value="22000.0"/>
                 <nml_option name="config_xnutr"                      type="real"          default_value="0.2"/>
+        </nml_record>
+
+        <nml_record name="dfi" in_defaults="true">
+                <nml_option name="config_dfi"                         type="integer"          default_value="0"/>
+                <nml_option name="dfi_filt_choice"                    type="integer"          default_value="0"/>
+                <nml_option name="dt_dfi"                             type="real"          default_value="0.0"/>
+                <nml_option name="dfi_cutoff_seconds"                 type="real"          default_value="3600.0"/>
+                <nml_option name="dfi_time_dim"                       type="integer"          default_value="60000"/>
+                <nml_option name="dfi_bck_duration"                   type="character"     default_value="1_00:00:00"/>
+                <nml_option name="dfi_fwd_duration"                   type="character"     default_value="1_00:00:00"/>
         </nml_record>
 
         <nml_record name="io" in_defaults="true">
@@ -153,6 +164,12 @@
 			<var name="fEdge"/>
 			<var name="fVertex"/>
 			<var name="meshDensity"/>
+                        <var name="isGhostCell"/>
+                        <var name="isGhostEdge"/>
+                        <var name="isGhostVertex"/>
+                        <var name="symmetricCell"/>
+                        <var name="symmetricEdge"/>
+                        <var name="symmetricVertex"/>
 			<var name="cf1"/>
 			<var name="cf2"/>
 			<var name="cf3"/>
@@ -273,6 +290,12 @@
 			<var name="meshDensity"/>
 			<var name="meshScalingDel2"/>
 			<var name="meshScalingDel4"/>
+                        <var name="isGhostCell"/>
+                        <var name="isGhostEdge"/>
+                        <var name="isGhostVertex"/>
+                        <var name="symmetricCell"/>
+                        <var name="symmetricEdge"/>
+                        <var name="symmetricVertex"/>
 			<var name="cf1"/>
 			<var name="cf2"/>
 			<var name="cf3"/>
@@ -514,7 +537,7 @@
                         type="output" 
                         filename_template="history.$Y-$M-$D_$h.$m.$s.nc" 
                         output_interval="6:00:00"
-                        runtime_format="separate_file">
+                        runtime_format="single_file">
 
 			<var name="latCell"/>
 			<var name="lonCell"/>
@@ -552,12 +575,19 @@
 			<var name="cellsOnVertex"/>
 			<var name="kiteAreasOnVertex"/>
 			<var name="meshDensity"/>
+                        <var name="isGhostCell"/>
+                        <var name="isGhostEdge"/>
+                        <var name="isGhostVertex"/>
+                        <var name="symmetricCell"/>
+                        <var name="symmetricEdge"/>
+                        <var name="symmetricVertex"/>
 			<var name="zgrid"/>
 			<var name="fzm"/>
 			<var name="fzp"/>
 			<var name="zz"/>
 			<var name="xtime"/>
 			<var name="u"/>
+			<var name="v"/>
 			<var name="w"/>
 			<var name="pressure"/>
 			<var name="surface_pressure"/>
@@ -613,7 +643,7 @@
                         type="output" 
                         filename_template="diag.$Y-$M-$D_$h.$m.$s.nc" 
                         output_interval="3:00:00"
-                        runtime_format="separate_file">
+                        runtime_format="single_file">
 
 			<var name="xtime"/>
 			<var name="olrtoa"/>
@@ -647,7 +677,7 @@
                         filename_template="x1.40962.sfc_update.nc" 
                         input_interval="none"
                         filename_interval="none"
-                        runtime_format="separate_file">
+                        runtime_format="single_file">
 
 			<var name="sst"/>
 			<var name="xice"/>
@@ -706,6 +736,12 @@
                 <var name="meshDensity"               type="real"     dimensions="nCells"/>
                 <var name="meshScalingDel2"           type="real"     dimensions="nEdges"/>
                 <var name="meshScalingDel4"           type="real"     dimensions="nEdges"/>
+                <var name="isGhostCell"               type="integer"  dimensions="nCells"/>
+                <var name="isGhostEdge"               type="integer"  dimensions="nEdges"/>
+                <var name="isGhostVertex"             type="integer"  dimensions="nVertices"/>
+                <var name="symmetricCell"             type="integer"  dimensions="nCells"/>
+                <var name="symmetricEdge"             type="integer"  dimensions="nEdges"/>
+                <var name="symmetricVertex"           type="integer"  dimensions="nVertices"/>
 
                 <!-- coefficients for vertical extrapolation to the surface -->
                 <var name="cf1"                       type="real"     dimensions=""/>
@@ -905,6 +941,24 @@
                 <var name="vorticity_500hPa"       type="real"     dimensions="nVertices Time"/>
                 <var name="vorticity_700hPa"       type="real"     dimensions="nVertices Time"/>
                 <var name="vorticity_850hPa"       type="real"     dimensions="nVertices Time"/>
+
+                <var name="dfi_state"              type="integer"  dimensions=""/>
+                <var name="dfi_filt_coeff"         type="real"     dimensions="dfi_time"/>
+                <var name="dfi_filt_accum"         type="real"     dimensions=""/>
+                <!-- Prognostic variables: read from input, saved in restart, and written to output -->
+                <var name="dfi_u"         type="real"     dimensions="nVertLevels nEdges Time"/>
+                <var name="dfi_w"         type="real"     dimensions="nVertLevelsP1 nCells Time"/>
+                <var name="dfi_rho_zz"    type="real"     dimensions="nVertLevels nCells Time"/>
+                <var name="dfi_theta_m"   type="real"     dimensions="nVertLevels nCells Time"/>
+                <var name="dfi_ps"      type="real"     dimensions="nCells Time"/>
+                <var_array name="dfi_scalars" type="real" dimensions="nVertLevels nCells Time">
+                        <var name="dfi_qv"      array_group="moist"/>
+                        <var name="dfi_qc"      array_group="moist"/>
+                        <var name="dfi_qr"      array_group="moist"/>
+                        <var name="dfi_qi"      array_group="moist"/>
+                        <var name="dfi_qs"      array_group="moist"/>
+                        <var name="dfi_qg"      array_group="moist"/>
+                </var_array>
         </var_struct>
 
         <var_struct name="tend" time_levs="1">

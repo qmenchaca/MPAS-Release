@@ -26,7 +26,7 @@ module atm_core_interface
    subroutine atm_setup_core(core)
 
       use mpas_derived_types, only : core_type
-      use atm_core, only : atm_core_init, atm_core_run, atm_core_finalize
+      use atm_core, only : atm_core_init, atm_core_run, atm_core_dfi, atm_core_finalize
 
       implicit none
 
@@ -34,6 +34,7 @@ module atm_core_interface
 
       core % core_init => atm_core_init
       core % core_run => atm_core_run
+      core % core_dfi => atm_core_dfi
       core % core_finalize => atm_core_finalize
       core % define_packages => atm_define_packages
       core % setup_packages => atm_setup_packages

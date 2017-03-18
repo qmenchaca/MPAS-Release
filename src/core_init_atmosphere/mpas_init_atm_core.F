@@ -63,7 +63,17 @@ module init_atm_core
 
    end function init_atm_core_init
    
-   
+   function init_atm_core_dfi(domain) result(ierr)
+      use mpas_derived_types
+      type (domain_type), intent(inout) :: domain
+      integer :: ierr
+
+
+      ierr = 0
+
+! This shouldn't do anything
+   end function init_atm_core_dfi  
+ 
    function init_atm_core_run(domain) result(ierr)
    
       use mpas_derived_types

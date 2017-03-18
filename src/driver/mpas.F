@@ -13,6 +13,8 @@ program mpas
 
    call mpas_init()
 
+   call mpas_dfi() 
+
    call mpas_run() 
 
    call mpas_finalize()

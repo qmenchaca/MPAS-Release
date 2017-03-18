@@ -111,6 +111,8 @@ module atm_time_integration
       integer :: small_step
       logical, parameter :: debug = .false.
 !      logical, parameter :: debug = .true.
+!      logical, parameter :: baroclinic = .true.
+      logical, parameter :: baroclinic = .false.
 
       !  additions for splitting scalar transport from dynamics, WCS 18 November 2014
       logical, pointer :: config_split_dynamics_transport
@@ -219,6 +221,20 @@ module atm_time_integration
       number_sub_steps(3) = number_of_sub_steps
 
       if(debug) write(0,*) ' copy step in rk solver '
+      if(baroclinic) write(0,*) ' We employ symmetric boundary conditions on the plane. '
+
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'state', state)
+               call mpas_pool_get_subpool(block % structs, 'diag', diag)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,state, 'theta')
+		call set_sym_boundary(mesh,diag, 'pressure')
+		call set_sym_boundary(mesh,diag, 'rtheta')
+               block => block % next
+            end do
+	end if
 
 ! theta_m
       call mpas_dmpar_exch_halo_field(theta_m_field)
@@ -231,6 +247,7 @@ module atm_time_integration
 
 ! rtheta_p
       call mpas_dmpar_exch_halo_field(rtheta_p_field)
+
 
 
       block => domain % blocklist
@@ -309,6 +326,15 @@ module atm_time_integration
             ! tend_u
             call mpas_pool_get_subpool(domain % blocklist % structs, 'tend', tend)
             call mpas_pool_get_field(tend, 'u', tend_u_field)
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'tend', tend)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,tend, 'tend_u')
+               block => block % next
+            end do
+	end if
             call mpas_dmpar_exch_halo_field(tend_u_field, (/ 1 /))
 
             block => domain % blocklist
@@ -370,10 +396,28 @@ module atm_time_integration
             call mpas_dmpar_exch_halo_field(ru_p_field)
 
             call mpas_pool_get_field(diag, 'rho_pp', rho_pp_field)
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'diag', diag)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,diag, 'rho_pp')
+               block => block % next
+            end do
+	end if
             call mpas_dmpar_exch_halo_field(rho_pp_field)
 
             ! the second layer of halo cells must be exchanged before calling atm_recover_large_step_variables
             call mpas_pool_get_field(diag, 'rtheta_pp', rtheta_pp_field)
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'diag', diag)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,diag, 'rtheta_pp')
+               block => block % next
+            end do
+	end if
             call mpas_dmpar_exch_halo_field(rtheta_pp_field, (/ 2 /))
 
             block => domain % blocklist
@@ -391,6 +435,15 @@ module atm_time_integration
             ! u
             !CR: SMALLER STENCIL?: call mpas_dmpar_exch_halo_field(block % state % time_levs(2) % state % u, (/ 3 /))
             call mpas_pool_get_subpool(domain % blocklist % structs, 'state', state)
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'state', state)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,state, 'u')
+               block => block % next
+            end do
+	end if
             call mpas_pool_get_field(state, 'u', u_field, 2)
             call mpas_dmpar_exch_halo_field(u_field)
 
@@ -442,6 +495,15 @@ module atm_time_integration
 
             ! w
             call mpas_pool_get_subpool(domain % blocklist % structs, 'state', state)
+	if(baroclinic) then
+            block => domain % blocklist
+            do while (associated(block))
+               call mpas_pool_get_subpool(block % structs, 'state', state)
+               call mpas_pool_get_subpool(block % structs, 'mesh', mesh)
+		call set_sym_boundary(mesh,state,'w')
+               block => block % next
+            end do
+	end if
             call mpas_pool_get_field(state, 'w', w_field, 2)
             call mpas_dmpar_exch_halo_field(w_field)
 
@@ -2493,7 +2555,7 @@ module atm_time_integration
 
       logical, parameter :: debug = .false.
 
-      logical, parameter :: curvature = .true.
+      logical, parameter :: curvature = .false.
       real (kind=RKIND), pointer :: r_earth
       real (kind=RKIND), dimension(:,:), pointer :: ur_cell, vr_cell
 
@@ -2786,6 +2848,11 @@ module atm_time_integration
                        *(pzm(k,cell2)*(pp(k  ,cell2)-pp(k-1,cell2))    &
                         +pzm(k,cell1)*(pp(k  ,cell1)-pp(k-1,cell1)))   
 
+!		if(iEdge == 301) write(0,*) 'Pressure grad here is'
+!		if(iEdge == 301) write(0,*) (pp(30,cell2) - pp(30,cell1))/dcEdge(iEdge)
+!		if(iEdge == 302) write(0,*) 'Pressure grad here is'
+!		if(iEdge == 302) write(0,*) -(pp(30,cell2) - pp(30,cell1))/dcEdge(iEdge)
+
             do k=1,nVertLevels
 
                tend_u(k,iEdge) =  - cqu(k,iEdge)*((pp(k,cell2)-pp(k,cell1))/dcEdge(iEdge)   &
@@ -2793,6 +2860,9 @@ module atm_time_integration
             end do
 
          end if
+
+!	if(iEdge == 302) write(0,*) 'tend_u after pressure grad'
+!	if(iEdge == 302) write(0,*) tend_u(30,iEdge)
 
          ! vertical transport of u
 
@@ -2829,6 +2899,8 @@ module atm_time_integration
          do k=1,nVertLevels
             tend_u(k,iEdge) = tend_u(k,iEdge) - rdzw(k)*(wduz(k+1)-wduz(k)) 
          end do
+!	if(iEdge == 301) write(0,*) 'tend_u after vert trans grad'
+!	if(iEdge == 301) write(0,*) tend_u(30,iEdge)
 
          ! Next, nonlinear Coriolis term (q) following Ringler et al JCP 2009
 
@@ -2846,8 +2918,20 @@ module atm_time_integration
             ! horizontal ke gradient and vorticity terms in the vector invariant formulation
             ! of the horizontal momentum equation
             tend_u(k,iEdge) = tend_u(k,iEdge) + rho_edge(k,iEdge)* (q(k) - (ke(k,cell2) - ke(k,cell1))       &
+!            tend_u(k,iEdge) = tend_u(k,iEdge) - rho_edge(k,iEdge)* (q(k) - (ke(k,cell2) - ke(k,cell1))       &
                                                                  / dcEdge(iEdge))                            &
                                              - u(k,iEdge)*0.5*(divergence_ru(k,cell1)+divergence_ru(k,cell2)) 
+
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) 'tend_u after coriolis + KE + vort'
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) tend_u(30,iEdge)
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) 'Coriolis is'
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) rho_edge(30,iEdge)*q(30)
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) 'KE is'
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) -rho_edge(30,iEdge)*(ke(30,cell2) - ke(30,cell1))/dcEdge(iEdge)
+
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) 'Combo is'
+!	if((iEdge == 302) .and. (k == 30)) write(0,*) rho_edge(30,iEdge)*q(30) -rho_edge(30,iEdge)*(ke(30,cell2) - ke(30,cell1))/dcEdge(iEdge)
+
             if (curvature) then
 
                ! curvature terms for the sphere
@@ -2858,6 +2942,9 @@ module atm_time_integration
                                 - u(k,iEdge)*.25*(w(k+1,cell1)+w(k,cell1)+w(k,cell2)+w(k+1,cell2))                  &
                                   *rho_edge(k,iEdge)/r_earth
             end if
+
+!	if((iEdge == 301) .and. (k == 30)) write(0,*) 'tend_u after curvature'
+!	if((iEdge == 301) .and. (k == 30)) write(0,*) tend_u(30,iEdge)
          end do
       end do
 
@@ -3093,7 +3180,10 @@ module atm_time_integration
          do k=1,nVertLevels
             tend_u(k,iEdge) = tend_u(k,iEdge) + tend_u_euler(k,iEdge)
          end do
+!	if(iEdge == 301) write(0,*) 'tend_u after mixing'
+!	if(iEdge == 301) write(0,*) tend_u(30,iEdge)
       end do
+
 
 !----------- rhs for w
 
@@ -4206,6 +4296,108 @@ module atm_time_integration
       end if
 
    end subroutine atm_rk_dynamics_substep_finish
+
+   subroutine set_sym_boundary(mesh,pool_use,field_name)
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! Sets symmetric boundary condition for variable field_name
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      type (mpas_pool_type), intent(in) :: mesh
+      type (mpas_pool_type), intent(inout) :: pool_use
+      character(len=*), intent(in) :: field_name
+
+	real (kind=RKIND), dimension(:,:),pointer :: field
+
+	integer, dimension(:),pointer :: isGhostCell,isGhostEdge,isGhostVertex, symmetricCell,symmetricEdge,symmetricVertex
+	real, dimension(:),pointer :: angleEdge
+	integer :: iLoop
+	integer,pointer :: loopDIM
+
+	real(kind=8), parameter :: pi = 4. * atan(1.0)
+
+! Lousy fortran won't let me trim the field_name to get the variable
+
+      call mpas_pool_get_array(mesh, 'angleEdge', angleEdge)
+      call mpas_pool_get_array(mesh, 'isGhostCell', isGhostCell)
+      call mpas_pool_get_array(mesh, 'isGhostEdge', isGhostEdge)
+      call mpas_pool_get_array(mesh, 'isGhostVertex', isGhostVertex)
+      call mpas_pool_get_array(mesh, 'symmetricCell', symmetricCell)
+      call mpas_pool_get_array(mesh, 'symmetricEdge', symmetricEdge)
+      call mpas_pool_get_array(mesh, 'symmetricVertex', symmetricVertex)
+
+
+
+ if(trim(field_name) == 'u' .or. trim(field_name) == 'tend_u' .or. trim(field_name) == 'ru_p') then ! u is stored at edges
+! Loop over edges
+	if(trim(field_name) == 'u') 		call mpas_pool_get_array(pool_use, 'u', field,2)
+	if(trim(field_name) == 'tend_u') 	call mpas_pool_get_array(pool_use, 'u', field)
+	if(trim(field_name) == 'ru_p') 		call mpas_pool_get_array(pool_use, 'ru_p', field)
+
+      call mpas_pool_get_dimension(mesh, 'nEdges', loopDIM)
+
+	do iLoop = 1, loopDIM
+
+	  if(isGhostEdge(iLoop) == 1) then ! Overwrite with data from symmetricEdge
+!	    if(angleEdge(iLoop) .eq. pi / 2.) then
+	    if(angleEdge(iLoop) .eq. 0) then
+	      if(symmetricEdge(iLoop) .eq. iLoop) then 
+		! We lie ON the boundary, no flow
+		field(:,iLoop) = 0.0
+	      else
+	        field(:,iLoop) = -field(:,symmetricEdge(iLoop))
+	      end if
+	    else
+	        field(:,iLoop) = field(:,symmetricEdge(iLoop))
+	    end if
+
+	  end if
+	end do
+
+ else ! Every other possible variable is stored at cell centers
+! Loop over cells
+	if(trim(field_name) == 'theta') 	call mpas_pool_get_array(pool_use, 'theta_m', field,2)
+	if(trim(field_name) == 'w')	 	call mpas_pool_get_array(pool_use, 'w', field,2)
+	if(trim(field_name) == 'pressure') 	call mpas_pool_get_array(pool_use, 'pressure_p', field)
+	if(trim(field_name) == 'rho_zz')	call mpas_pool_get_array(pool_use, 'rho_zz', field,2)
+	if(trim(field_name) == 'rtheta') 	call mpas_pool_get_array(pool_use, 'rtheta_p', field)
+	if(trim(field_name) == 'tend_theta') 	call mpas_pool_get_array(pool_use, 'theta_m', field)
+	if(trim(field_name) == 'tend_rho') 	call mpas_pool_get_array(pool_use, 'rho_zz', field)
+	if(trim(field_name) == 'tend_w') 	call mpas_pool_get_array(pool_use, 'w', field)
+	if(trim(field_name) == 'rtheta_pp') 	call mpas_pool_get_array(pool_use, 'rtheta_pp', field)
+	if(trim(field_name) == 'rho_pp') 	call mpas_pool_get_array(pool_use, 'rho_pp', field)
+	if(trim(field_name) == 'rw_p')	 	call mpas_pool_get_array(pool_use, 'rw_p', field)
+
+      call mpas_pool_get_dimension(mesh, 'nCells', loopDIM)
+
+	do iLoop = 1, loopDIM
+	  if(isGhostCell(iLoop) == 1) then ! Overwrite with data from symmetricCell
+	    field(:,iLoop) = field(:,symmetricCell(iLoop))
+	  end if
+	end do
+
+
+ end if
+ if(1.eq. 0) then ! at the moment, there is no reason to loop over vertices)
+! Loop over vertices
+      call mpas_pool_get_dimension(mesh, 'nVertices', loopDIM)
+
+	do iLoop = 1, loopDIM
+!	  if(iLoop .lt. 100) then
+!		write(0,*) 'Vertex loop'
+!		write(0,*) iLoop,symmetricVertex(iLoop)
+!	  end if
+
+	  if(isGhostVertex(iLoop) == 1) then ! Overwrite with data from symmetricVertex
+	    if(symmetricVertex(iLoop) .eq. iLoop) then
+	      ! We lie ON the boundary
+	      field(:,iLoop) = 0.0
+	    else
+	      field(:,iLoop) = -field(:,symmetricVertex(iLoop))
+	    end if
+	  end if
+	end do
+ end if
+
+   end subroutine set_sym_boundary
 
 
 end module atm_time_integration

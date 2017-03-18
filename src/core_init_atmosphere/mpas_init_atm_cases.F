@@ -239,11 +239,31 @@ module init_atm_cases
             block_ptr => block_ptr % next
          end do
 
+      else if ((config_init_case == 9)) then
+
+         write(0,*) ' planar baroclinic wave test case '
+         block_ptr => domain % blocklist
+         do while (associated(block_ptr))
+
+            call mpas_pool_get_dimension(block_ptr % dimensions, 'nCells', nCells)
+            call mpas_pool_get_dimension(block_ptr % dimensions, 'nVertLevels', nVertLevels)
+
+            call mpas_pool_get_subpool(block_ptr % structs, 'mesh', mesh)
+            call mpas_pool_get_subpool(block_ptr % structs, 'state', state)
+            call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+
+            write(0,*) ' calling test case setup '
+            call init_atm_case_planar_baro(domain % dminfo, mesh, nCells, nVertLevels, state, diag, config_init_case)
+            call decouple_variables(mesh, nCells, nVertLevels, state, diag)
+            write(0,*) ' returned from test case setup '
+            block_ptr => block_ptr % next
+         end do
+
       else
 
          write(0,*) ' '
          write(0,*) ' ****************************************************'
-         write(0,*) ' Only test cases 1 through 8 are currently supported.'
+         write(0,*) ' Only test cases 1 through 9 are currently supported.'
          write(0,*) ' ****************************************************'
          write(0,*) ' '
          call mpas_dmpar_abort(domain % dminfo)
@@ -1264,7 +1284,8 @@ module init_atm_cases
       real (kind=RKIND) :: d1, d2, d3, cof1, cof2
       real (kind=RKIND), pointer :: cf1, cf2, cf3
       real (kind=RKIND) :: ztr, thetar, ttr, thetas, um, us, zts, pitop, pibtop, ptopb, ptop, rcp, rcv, p0
-      real (kind=RKIND) :: radx, radz, zcent, xmid, delt, xloc, rad, yloc, ymid, a_scale
+      real (kind=RKIND) :: radx1, radx2, radz, zcent, xmid, delt, xloc, rad, yloc, ymid
+      real (kind=RKIND) :: y_quart, y_3quart, yloc_1, yloc_2, rad1, rad2, a_scale
       real (kind=RKIND) :: pres, temp, es, qvs
 
       real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
@@ -1643,7 +1664,8 @@ module init_atm_cases
 !      delt = -10.
 !      delt = -0.01
       delt = 3.
-      radx  = 10000.
+      radx1  = 2000.
+      radx2  = 5000.
       radz  = 1500.
       zcent = 1500.
 
@@ -1655,6 +1677,8 @@ module init_atm_cases
          call mpas_dmpar_max_real(dminfo, maxval(xCell(:)), xmid)
          call mpas_dmpar_max_real(dminfo, maxval(yCell(:)), ymid)
          xmid = xmid * 0.5
+         y_quart = ymid * 0.25
+         y_3quart = ymid * 0.75
          ymid = ymid * 0.5
       end if
 
@@ -1664,13 +1688,21 @@ module init_atm_cases
            yloc = 0.                            !squall line setting
         else if (test_case == 5) then
            yloc = yCell(i) - ymid !supercell setting
+           yloc_1 = yCell(i) - y_quart !supercell setting
+           yloc_2 = yCell(i) - y_3quart !supercell setting
         end if
 
         do k = 1,nz1
           ztemp     = .5*(zgrid(k+1,i)+zgrid(k,i))
-          rad =sqrt((xloc/radx)**2+(yloc/radx)**2+((ztemp-zcent)/radz)**2)
-          if(rad.lt.1)  then
-            thi(k,i) = thi(k,i) + delt*cos(.5*pii*rad)**2
+!          rad =sqrt((xloc/radx)**2+(yloc/radx)**2+((ztemp-zcent)/radz)**2)
+          rad1 =sqrt((xloc/radx1)**2+(yloc_1/radx1)**2+((ztemp-zcent)/radz)**2)
+          rad2 =sqrt((xloc/radx2)**2+(yloc_2/radx2)**2+((ztemp-zcent)/radz)**2)
+!          if(rad.lt.1)  then
+          if(rad1.lt.1)  then
+            thi(k,i) = thi(k,i) + delt*cos(.5*pii*rad1)**2
+          end if
+          if(rad2.lt.1)  then
+            thi(k,i) = thi(k,i) + delt*cos(.5*pii*rad2)**2
           end if
            t (k,i) = thi(k,i)*(1.+1.61*scalars(index_qv,k,i))
         end do
@@ -2429,6 +2461,821 @@ module init_atm_cases
 
    end subroutine init_atm_case_mtn_wave
 
+!----------------------------------------------------------------------------------------------------------
+
+   subroutine init_atm_case_planar_baro(dminfo, mesh, nCells, nVertLevels, state, diag, test_case)
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! Setup planar baroclinic wave case, complete with rigid boundary conditions in y
+   ! Code template copied from squall line
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+      implicit none
+
+      type (dm_info), intent(in) :: dminfo
+      type (mpas_pool_type), intent(inout) :: mesh
+      integer, intent(in) :: nCells
+      integer, intent(in) :: nVertLevels
+      type (mpas_pool_type), intent(inout) :: state
+      type (mpas_pool_type), intent(inout) :: diag
+      integer, intent(in) :: test_case
+
+      real (kind=RKIND), dimension(:), pointer :: rdzw, dzu, rdzu, fzm, fzp, ter
+      real (kind=RKIND), dimension(:,:), pointer :: zgrid, zx, zz, hx, cqw
+      real (kind=RKIND), dimension(:,:), pointer :: ppb, pb, rho_zz, rb, rr, tb, rtb, p, pp, dss, t, rt, u, ru
+      real (kind=RKIND), dimension(:,:,:), pointer :: scalars
+      real (kind=RKIND), dimension(:,:,:), pointer :: zb, zb3
+
+      !This is temporary variable here. It just need when calculate tangential velocity v.
+      integer :: eoe, j
+      integer, dimension(:), pointer :: nEdgesOnEdge 
+      integer, dimension(:,:), pointer :: edgesOnEdge, cellsOnEdge,vOnE
+      real (kind=RKIND), dimension(:,:), pointer :: weightsOnEdge
+
+      integer :: iCell, iCell1, iCell2 , iEdge, vtx1, vtx2, ivtx, i, k, nz, nz1, itr, cell1, cell2
+      integer, pointer :: nEdges, nVertices, maxEdges, nCellsSolve
+      integer, pointer :: index_qv
+
+      real (kind=RKIND), dimension(nVertLevels + 1 ) :: znu, znw, znwc, znwv
+      real (kind=RKIND), dimension(nVertLevels + 1 ) :: znuc, znuv
+
+      real (kind=RKIND), dimension(nVertLevels + 1 ) :: zc, zw, ah
+      real (kind=RKIND), dimension(nVertLevels ) :: zu, dzw, rdzwp, rdzwm
+
+      real (kind=RKIND), dimension(nVertLevels, nCells) :: relhum, thi, tbi, cqwb
+
+      real (kind=RKIND) ::  r, xnutr
+      real (kind=RKIND) ::  ztemp, zd, zt, dz, str
+
+      real (kind=RKIND), dimension(nVertLevels ) :: qvb
+      real (kind=RKIND), dimension(nVertLevels ) :: t_init_1d
+
+      real (kind=RKIND) :: d1, d2, d3, cof1, cof2
+      real (kind=RKIND), pointer :: cf1, cf2, cf3
+      real (kind=RKIND) :: um, us, zts, pitop, pibtop, ptopb, ptop, rcp, rcv, p0
+      real (kind=RKIND) :: radx, radz, zcent, xmid, delt, xloc, rad, yloc, ymid, a_scale,xmin,xmax,ymax
+      real (kind=RKIND) :: pres, temp, es, qvs
+
+      real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
+      real (kind=RKIND), dimension(:), pointer :: xEdge, yEdge, zEdge
+      real (kind=RKIND), dimension(:), pointer :: xVertex, yVertex, zVertex
+      real (kind=RKIND), dimension(:), pointer :: dcEdge, dvEdge, areaCell, areaTriangle
+      real (kind=RKIND), dimension(:), pointer :: p_surf
+      real (kind=RKIND), dimension(:,:), pointer :: kiteAreasOnVertex
+      integer, dimension(:), pointer :: isGhostCell, isGhostEdge, isGhostVertex
+      logical, pointer :: on_a_sphere
+      real (kind=RKIND), pointer :: sphere_radius
+
+      real (kind=RKIND), dimension(:,:), pointer :: t_init, w, rw, v, rho, theta
+      real (kind=RKIND), dimension(:), pointer :: u_init, qv_init, angleEdge, fEdge, fVertex
+
+      ! The folowing few arrays+parameters are used to read in the input jet, and then interpolate
+	integer :: nx,ny,ys,xs
+	real :: dy,dyy,curr_y,curr_x,p_const,ybndS, ybndN, p_u, p_v
+	real (kind=RKIND), allocatable, dimension(:,:) :: u_in,v_in,theta_in,p_in
+	real (kind=RKIND), allocatable, dimension(:,:,:) :: u_pert,v_pert,theta_pert,press_pert
+	real (kind=RKIND), allocatable, dimension(:) :: x_p,y_p
+	real (kind=RKIND), allocatable, dimension(:) :: y_in,surf_in
+	logical :: read_ext
+
+      call mpas_pool_get_array(mesh, 'xCell', xCell)
+      call mpas_pool_get_array(mesh, 'yCell', yCell)
+      call mpas_pool_get_array(mesh, 'zCell', zCell)
+      call mpas_pool_get_array(mesh, 'xEdge', xEdge)
+      call mpas_pool_get_array(mesh, 'yEdge', yEdge)
+      call mpas_pool_get_array(mesh, 'zEdge', zEdge)
+      call mpas_pool_get_array(mesh, 'xVertex', xVertex)
+      call mpas_pool_get_array(mesh, 'yVertex', yVertex)
+      call mpas_pool_get_array(mesh, 'zVertex', zVertex)
+      call mpas_pool_get_array(mesh, 'dvEdge', dvEdge)
+      call mpas_pool_get_array(mesh, 'dcEdge', dcEdge)
+      call mpas_pool_get_array(mesh, 'areaCell', areaCell)
+      call mpas_pool_get_array(mesh, 'areaTriangle', areaTriangle)
+      call mpas_pool_get_array(mesh, 'kiteAreasOnVertex', kiteAreasOnVertex)
+      call mpas_pool_get_array(mesh, 'isGhostCell', isGhostCell)
+      call mpas_pool_get_array(mesh, 'isGhostEdge', isGhostEdge)
+      call mpas_pool_get_array(mesh, 'isGhostVertex', isGhostVertex)
+
+      call mpas_pool_get_config(mesh, 'on_a_sphere', on_a_sphere)
+      call mpas_pool_get_config(mesh, 'sphere_radius', sphere_radius)
+
+      !
+      ! Scale all distances
+      !
+
+      a_scale = 1.0
+
+      xCell(:) = xCell(:) * a_scale
+      yCell(:) = yCell(:) * a_scale
+      zCell(:) = zCell(:) * a_scale
+      xVertex(:) = xVertex(:) * a_scale
+      yVertex(:) = yVertex(:) * a_scale
+      zVertex(:) = zVertex(:) * a_scale
+      xEdge(:) = xEdge(:) * a_scale
+      yEdge(:) = yEdge(:) * a_scale
+      zEdge(:) = zEdge(:) * a_scale
+      dvEdge(:) = dvEdge(:) * a_scale
+      dcEdge(:) = dcEdge(:) * a_scale
+      areaCell(:) = areaCell(:) * a_scale**2.0
+      areaTriangle(:) = areaTriangle(:) * a_scale**2.0
+      kiteAreasOnVertex(:,:) = kiteAreasOnVertex(:,:) * a_scale**2.0
+
+      call mpas_pool_get_array(mesh, 'weightsOnEdge', weightsOnEdge)
+      call mpas_pool_get_array(mesh, 'nEdgesOnEdge', nEdgesOnEdge)
+      call mpas_pool_get_array(mesh, 'edgesOnEdge', edgesOnEdge)
+      call mpas_pool_get_array(mesh, 'cellsOnEdge', cellsOnEdge)
+      call mpas_pool_get_array(mesh, 'verticesOnEdge', vOnE)
+
+      call mpas_pool_get_dimension(mesh, 'nEdges', nEdges)
+      call mpas_pool_get_dimension(mesh, 'nVertices', nVertices)
+      call mpas_pool_get_dimension(mesh, 'nCellsSolve', nCellsSolve)
+      call mpas_pool_get_dimension(mesh, 'maxEdges', maxEdges)
+      nz1 = nVertLevels
+      nz = nz1 + 1
+
+! ny is the y dimension of the jet - much higher than ny used in the actual test case because we want to have ZERO interpolation in the initial state
+      ny = 801
+! nx is the number of rows we want to have - HARDWIRED to account for the size of the external file
+      nx = 240
+! Southern boundary is 2.5 cells of coarse resolution away from y = 0
+! I.e., there are two ghost cells.
+! The choice of calling the 2nd element is an arbitrary choice.
+! In other words, in the first column, the first 2.5 cells are in the ghost zone
+!            and in the second column, the first 2   cells are in the ghost zone
+	ybndS = (5./2.) *dcEdge(2) 
+
+
+      call mpas_pool_get_array(mesh, 'zgrid', zgrid)
+      call mpas_pool_get_array(mesh, 'zb', zb)
+      call mpas_pool_get_array(mesh, 'zb3', zb3)
+      call mpas_pool_get_array(mesh, 'rdzw', rdzw)
+      call mpas_pool_get_array(mesh, 'dzu', dzu)
+      call mpas_pool_get_array(mesh, 'rdzu', rdzu)
+      call mpas_pool_get_array(mesh, 'fzm', fzm)
+      call mpas_pool_get_array(mesh, 'fzp', fzp)
+      call mpas_pool_get_array(mesh, 'zx', zx)
+      call mpas_pool_get_array(mesh, 'zz', zz)
+      call mpas_pool_get_array(mesh, 'hx', hx)
+      call mpas_pool_get_array(mesh, 'dss', dss)
+      call mpas_pool_get_array(mesh, 't_init', t_init)
+      call mpas_pool_get_array(mesh, 'u_init', u_init)
+      call mpas_pool_get_array(mesh, 'qv_init', qv_init)
+      call mpas_pool_get_array(mesh, 'angleEdge', angleEdge)
+      call mpas_pool_get_array(mesh, 'fEdge', fEdge)
+      call mpas_pool_get_array(mesh, 'fVertex', fVertex)
+
+      call mpas_pool_get_array(mesh, 'cf1', cf1)
+      call mpas_pool_get_array(mesh, 'cf2', cf2)
+      call mpas_pool_get_array(mesh, 'cf3', cf3)
+
+      call mpas_pool_get_array(diag, 'pressure_base', ppb)
+      call mpas_pool_get_array(diag, 'exner_base', pb)
+      call mpas_pool_get_array(diag, 'rho_base', rb)
+      call mpas_pool_get_array(diag, 'theta_base', tb)
+      call mpas_pool_get_array(diag, 'rtheta_base', rtb)
+      call mpas_pool_get_array(diag, 'exner', p)
+      call mpas_pool_get_array(diag, 'cqw', cqw)
+
+      call mpas_pool_get_array(diag, 'pressure_p', pp)
+      call mpas_pool_get_array(diag, 'rho_p', rr)
+      call mpas_pool_get_array(diag, 'rtheta_p', rt)
+      call mpas_pool_get_array(diag, 'ru', ru)
+      call mpas_pool_get_array(diag, 'rw', rw)
+      call mpas_pool_get_array(diag, 'v', v)
+      call mpas_pool_get_array(diag, 'rho', rho)
+      call mpas_pool_get_array(diag, 'theta', theta)
+      call mpas_pool_get_array(diag, 'surface_pressure', p_surf)
+
+      call mpas_pool_get_array(state, 'rho_zz', rho_zz)
+      call mpas_pool_get_array(state, 'theta_m', t)
+      call mpas_pool_get_array(state, 'u', u)
+      call mpas_pool_get_array(state, 'w', w)
+      call mpas_pool_get_array(state, 'scalars', scalars)
+
+      call mpas_pool_get_dimension(state, 'index_qv', index_qv)
+
+      scalars(:,:,:) = 0.
+
+      call atm_initialize_advection_rk(mesh, nCells, nEdges, maxEdges, on_a_sphere, sphere_radius )
+      call atm_initialize_deformation_weights(mesh, nCells, on_a_sphere, sphere_radius)
+      
+      xnutr = 0.2
+      zd = 14000.
+
+      p0 = 1.e+05
+      rcp = rgas/cp
+      rcv = rgas/(cp-rgas)
+
+!
+!     potential temperature perturbation to excite baroclinic wave
+!
+      delt = 10.
+!      delt = -0.01
+!      delt = 0.0 ! No perturbation
+      radx  = 2000000.
+      radz  = 8000.
+      zcent = 8000.
+
+     write(0,*) ' point 1 in test case setup '
+
+! First thing's first - read in jet
+	allocate(y_in(ny))
+	allocate(surf_in(ny))
+	allocate(u_in(nz1,ny))
+	allocate(v_in(nz1,ny))
+	allocate(p_in(nz1,ny))
+	allocate(theta_in(nz1,ny))
+	allocate(u_pert(nz1,ny/4 +2,nx+2))
+	allocate(v_pert(nz1,ny/4 +2,nx+2))
+	allocate(press_pert(nz1,ny/4 +2,nx+2))
+	allocate(theta_pert(nz1,ny/4+2,nx+2))
+	allocate(x_p(nx+2))
+	allocate(y_p(ny/4+2))
+
+         call mpas_dmpar_max_real(dminfo, maxval(xCell(:)), xmax)
+         call mpas_dmpar_min_real(dminfo, minval(xCell(:)), xmin)
+         call mpas_dmpar_max_real(dminfo, maxval(yCell(:)), ymax)
+         xmid = xmax * 0.5
+         ymid = ymax * 0.5
+	 ybndN = ymax - ybndS
+
+	write(0,*) size(theta_in)
+ call read_input_jet(y_in, surf_in, u_in, v_in, p_in, theta_in, nz1, ny)
+! y is evenly spaced in the input file
+ dy = y_in(2) - y_in(1)
+
+! Zero out pert arrays
+  u_pert(:,:,:) = 0.0
+  v_pert(:,:,:) = 0.0
+  press_pert(:,:,:) = 0.0
+  theta_pert(:,:,:) = 0.0
+
+! If we want to add a perturbation, read it in.
+ inquire(FILE='external_pert.txt',exist=read_ext)
+ if(read_ext) then
+   write(0,*) 'Reading in external perturbation to base jet.'
+ call read_perturbation(x_p, y_p, u_pert, v_pert, press_pert, theta_pert, nz1, ny/4 + 2, nx + 2, dy,xmax,ymax)
+   dyy = y_p(3) - y_p(2)
+ else
+   write(0,*) 'No external file, just reading in base jet.'
+ end if
+
+! The read in data is in hydrostatic and geostrophic balance
+! Hopefully geostrophic balance is roughly maintained after interpolation...
+
+
+! Check data is read in
+!	write(0,*) 'u at some column', u_in(:,300)
+!	write(0,*) 'pi at some column', pi_in(:,300)
+!	write(0,*) 'theta at some column', theta_in(:,300)
+
+! Terrain and vertical coordinate set up
+
+! We may pass in an hx(:,:) that has been precomputed elsewhere.
+! For now it is independent of k
+
+      do iCell=1,nCells
+        do k=1,nz
+          hx(k,iCell) = 0.  ! No terrain
+        end do
+      end do
+
+      !     metrics for hybrid coordinate and vertical stretching
+
+      str = 1.0
+      zt = 20000.
+      dz = zt/float(nz1)
+
+!      write(0,*) ' dz = ',dz
+      write(0,*) ' hx computation complete '
+
+      do k=1,nz
+
+!           sh(k) is the stretching specified for height surfaces
+
+            zc(k) = zt*(real(k-1)*dz/zt)**str 
+
+!           to specify specific heights zc(k) for coordinate surfaces,
+!           input zc(k) 
+!           zw(k) is the height of zeta surfaces
+!                zw(k) = (k-1)*dz yields constant dzeta
+!                        and nonconstant dzeta/dz
+!                zw(k) = sh(k)*zt yields nonconstant dzeta
+!                        and nearly constant dzeta/dz 
+
+!            zw(k) = float(k-1)*dz
+            zw(k) = zc(k)
+!
+!           ah(k) governs the transition between terrain-following 
+!           and pureheight coordinates
+!                ah(k) = 0 is a terrain-following coordinate
+!                ah(k) = 1 is a height coordinate
+ 
+!            ah(k) = 1.-cos(.5*pii*(k-1)*dz/zt)**6
+            ah(k) = 1.
+!            write(0,*) ' k, zc, zw, ah ',k,zc(k),zw(k),ah(k)
+      end do
+      do k=1,nz1
+         dzw (k) = zw(k+1)-zw(k)
+         rdzw(k) = 1./dzw(k)
+         zu(k  ) = .5*(zw(k)+zw(k+1))
+      end do
+      do k=2,nz1
+         dzu (k)  = .5*(dzw(k)+dzw(k-1))
+         rdzu(k)  =  1./dzu(k)
+         fzp (k)  = .5* dzw(k  )/dzu(k)
+         fzm (k)  = .5* dzw(k-1)/dzu(k)
+         rdzwp(k) = dzw(k-1)/(dzw(k  )*(dzw(k)+dzw(k-1)))
+         rdzwm(k) = dzw(k  )/(dzw(k-1)*(dzw(k)+dzw(k-1)))
+      end do
+
+!**********  how are we storing cf1, cf2 and cf3?
+
+      COF1 = (2.*DZU(2)+DZU(3))/(DZU(2)+DZU(3))*DZW(1)/DZU(2) 
+      COF2 =     DZU(2)        /(DZU(2)+DZU(3))*DZW(1)/DZU(3) 
+      CF1  = FZP(2) + COF1
+      CF2  = FZM(2) - COF1 - COF2
+      CF3  = COF2       
+
+!      d1  = .5*dzw(1)
+!      d2  = dzw(1)+.5*dzw(2)
+!      d3  = dzw(1)+dzw(2)+.5*dzw(3)
+!      cf1 = d2*d3*(d3-d2)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+!      cf2 = d1*d3*(d1-d3)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+!      cf3 = d1*d2*(d2-d1)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+
+      do iCell=1,nCells
+        do k=1,nz
+            zgrid(k,iCell) = ah(k)*(zc(k)*(1.-hx(k,iCell)/zt)+hx(k,iCell)) &
+                           + (1.-ah(k)) * zc(k)
+        end do
+        do k=1,nz1
+          zz (k,iCell) = (zw(k+1)-zw(k))/(zgrid(k+1,iCell)-zgrid(k,iCell))
+        end do
+      end do
+
+      do i=1, nEdges
+        iCell1 = cellsOnEdge(1,i)
+        iCell2 = cellsOnEdge(2,i)
+        do k=1,nz
+          zx (k,i) = (zgrid(k,iCell2)-zgrid(k,iCell1)) / dcEdge(i)
+        end do
+      end do
+      do i=1, nCells
+        do k=1,nz1
+          ztemp = .5*(zgrid(k+1,i)+zgrid(k,i))
+          dss(k,i) = 0.
+          ztemp = zgrid(k,i)
+          if(ztemp.gt.zd+.1)  then
+             dss(k,i) = dss(k,i)+xnutr*sin(.5*pii*(ztemp-zd)/(zt-zd))**2
+          end if
+        end do
+      end do
+
+! Finished terrain and vertical coordinate set up
+
+
+      !
+      ! Generate rotated Coriolis field
+      ! We are on the f plane
+      !
+      do iVtx=1,nVertices
+         fVertex(iVtx) = 1.e-4
+      end do
+
+!	Bin_search needed to interpolate to u and t 
+!		used below has this form:
+!   integer function bin_search(y, ny, key)
+
+         write(0,*) ' rgas, cp, gravity ',rgas,cp, gravity
+
+
+! We do a bin search to determine how we horizontally interpolate
+
+!	Set pitop and pbtop, maybe we will need them
+!	pitop = 426./cp
+!	pibtop = 426./cp
+!      ptopb = p0*pibtop**(1./rcp)
+!      write(6,*) 'ptopb = ',.01*ptopb
+
+         do i=1,nCells
+	    if(isGhostCell(i) == 1) cycle ! We set the ghost cells later
+	    curr_y  = yCell(i) - ybndS    ! Subtract off the ghost zone
+	    ys = bin_search(y_in,ny, curr_y)
+!		if(i .lt. 5) then
+!		  write(0,*) 'If statement to check if ys bin search is working'
+!		write(0,*) curr_y, ys
+!		end if
+!		if(i .eq. 101) write(0,*) theta_in(:,ys)
+!		if(i .eq. 101) write(0,*) 'Y here and y of theta', i, y_in(ys), curr_y,  yCell(i) - ybndS, ys
+!		if(i .eq. 3976) write(0,*) 'Y here and y of theta', i, y_in(ys), curr_y, yCell(i) - ybndS, ys
+            do k=1,nz1
+		t(k,i) = (curr_y-y_in(ys))/dy*theta_in(k,ys+1) + (y_in(ys+1)-curr_y)/dy*theta_in(k,ys)
+		p(k,i) = (curr_y-y_in(ys))/dy*  p_in(k,ys+1) + (y_in(ys+1)-curr_y)/dy*    p_in(k,ys)
+		p_surf(i) = (curr_y-y_in(ys))/dy*surf_in(ys+1) + (y_in(ys+1)-curr_y)/dy*  surf_in(ys)
+!	       relhum(k,i) = 0.0
+!               cqw(k,i) = 1.
+!               cqwb(k,i) = 1.
+            end do
+         end do
+
+! Just to make sure...
+         relhum(:,:) = 0.
+	 cqw(:,:) = 1.
+	 cqwb(:,:) = 1.
+
+!  set the velocity field - we are on a plane here.
+	us = 0.0 ! In the squall line case, us is used to keep the storm centered in the grid
+
+         do i=1, nEdges
+	    if(isGhostEdge(i) == 1) cycle ! We set the ghost cells later
+            cell1 = CellsOnEdge(1,i)
+            cell2 = CellsOnEdge(2,i)
+            if(cell1 <= nCellsSolve .or. cell2 <= nCellsSolve) then
+	      curr_y  = yEdge(i) - ybndS
+	      ys = bin_search(y_in,ny, curr_y)
+!		write(0,*) 'zero means no interp',i, curr_y - y_in(ys)
+!		if(i .eq. 502) write(0,*) 'Y here and y of u', i, y_in(ys), curr_y, yEdge(i) - ybndS, ys
+            do k=1,nz1
+	        u(k,i) = (curr_y-y_in(ys))/dy*u_in(k,ys+1) + (y_in(ys+1)-curr_y)/dy*u_in(k,ys)
+               if(i == 1 ) u_init(k) = u(k,i) - us
+               u(k,i) = cos(angleEdge(i)) * (u(k,i) - us)
+            end do
+            end if
+         end do
+
+	write(0,*) 'Setting sym boundaries'
+! Will need a condition for theta, pi, u, and fVertex - everything else is diagnosed from these
+! Set fEdge AFTER this call by averaging
+   call init_sym_boundary(mesh, state, diag,nCells,p_surf)
+	write(0,*) 'Finished setting sym boundaries'
+
+         call mpas_dmpar_bcast_reals(dminfo, nz1, u_init)
+
+!	Set fEdge from fVertex
+      do iEdge=1,nEdges
+         fEdge(iEdge) = 0.5*(fVertex(vOnE(1,iEdge)) + fVertex(vOnE(2,iEdge)))
+      end do
+
+!	BCs of full theta and pi set, set base field, and establish perturbations
+
+! Base field should be a function of z only - take the centerpoint of the read in base jet as the 'base' field
+
+         do i=1,nCells
+                tb(:,i) = theta_in(:,ny/2)
+!                tb(:,i) = t(:,i)
+                tbi(:,i) = tb(:,i)
+		pb(:,i) = p_in(:,ny/2)
+                thi(:,i) = t(:,i)
+	end do
+
+! Calculate p top from p_base
+	pibtop = pb(nz1,1) - .5*dzw(nz1)*gravity/(cp*tb(nz1,1))
+      ptopb = p0*pibtop**(1./rcp)
+      write(6,*) 'ptopb = ',.01*ptopb
+
+
+!
+!    for reference sounding 
+!
+      call mpas_dmpar_bcast_real(dminfo, pitop)
+      call mpas_dmpar_bcast_real(dminfo, pibtop)
+
+!	Pi, theta and dz were set above, everything else can be diagnosed from these values
+
+	do i = 1, nCells
+! I made sure that the rho and p diagnosed from ideal gas and exner 
+! in jet generation code
+! are already in hydrostatic balance.
+! That way, re-calculation of these values here 
+! won't throw off geostrophic balance
+
+	  do k = 1,nz1
+	    pp(k,i) = p0*(p(k,i)**(1/rcp))
+	    ppb(k,i) = p0*(pb(k,i)**(1/rcp))
+	    rr(k,i) = pp(k,i)/(rgas*t(k,i)*p(k,i))
+	    rb(k,i) = ppb(k,i)/(rgas*tb(k,i)*pb(k,i))
+
+! Now that we are finished using the full field,
+! subtract the base off of the full field to obtain the perturbation
+! t and pi are FULL fields. Only pressure, rho, and rho*theta have perturbation values
+	    pp(k,i) = pp(k,i) - ppb(k,i)
+	    rr(k,i) = rr(k,i) - rb(k,i)
+
+! Calculate coupled theta
+            rtb(k,i) = rb(k,i)*tb(k,i)
+	  end do
+      end do ! End loop over cells
+
+	write(0,*) 'Check if ppb is OK here', ppb(:,1), ppb(:,350)
+	write(0,*) 'Check if pp is OK here', pp(:,1), pp(:,350)
+	write(0,*) 'Check if pb is OK here', pb(:,1), pb(:,350)
+	write(0,*) 'Check if p is OK here', p(:,1), p(:,350)
+
+!	write(0,*) 'Check if rb is OK here', rb(:,1), rb(:,350)
+!	write(0,*) 'Check if rr is OK here', rr(:,1), rr(:,350)
+
+     !
+     ! update water vapor mixing ratio from humidity profile
+     !
+      do i= 1,nCells
+         do k=1,nz1
+            scalars(index_qv,k,i) = 0.0
+         end do
+      end do
+
+      do k=1,nz1
+!*********************************************************************
+!           QVB = QV INCLUDES MOISTURE IN REFERENCE STATE
+!            qvb(k) = scalars(index_qv,k,1)
+                                        
+!           QVB = 0 PRODUCES DRY REFERENCE STATE
+            qvb(k) = 0.
+!*********************************************************************
+      end do
+
+      write(0,*) ' base state sounding '
+      write(0,*) ' k,     pb,     rb,     tb,     rtb,     t,     rr,      p,    qvb'
+      do k=1,nVertLevels
+         write (0,'(i2,8(2x,f19.15))') k,pb(k,1),rb(k,1),tb(k,1),rtb(k,1),t(k,1),rr(k,1),p(k,1),qvb(k)
+      end do
+
+! Add in perturbation variables here
+ if(read_ext) then
+
+! We add in a PV anomaly - we have velocity, theta, and pressure perturbations
+! Add in theta perturbation and rho perturbation
+! Later we recover pressure from hydrostatic relation.
+         do i=1,nCells
+	    curr_y  = yCell(i) - ybndS
+	    curr_x  = xCell(i)
+! Just do ghost cells now.
+	if(curr_y .lt. 0.0) curr_y = -curr_y
+	if(curr_y .gt. ybndN) curr_y = 2.0*ybndN - curr_y
+
+	    ys = bin_search(y_p,ny/4 + 2, curr_y)
+	    xs = bin_search(x_p,nx + 2, curr_x)
+
+	if((ys .gt. 0) .and. (ys .lt. ny/4+2)) then
+	if((xs .gt. 0) .and. (xs .lt. nx+2)) then
+
+            do k=1,nz1
+		p_u = (dyy**(-2))*(   &
+			theta_pert(k,ys,xs)    *(y_p(ys+1)-curr_y)*(x_p(xs+1)-curr_x) +   &
+			theta_pert(k,ys+1,xs)  *(curr_y-y_p(ys))  *(x_p(xs+1)-curr_x) +   &
+			theta_pert(k,ys,xs+1)  *(y_p(ys+1)-curr_y)*(curr_x-x_p(xs)) +   &
+			theta_pert(k,ys+1,xs+1)*(curr_y-y_p(ys))  *(curr_x-x_p(xs)) )   
+		t(k,i) = t(k,i) + 2.*p_u
+                thi(k,i) = t(k,i)
+
+		p_u = (dyy**(-2))*(   &
+			press_pert(k,ys,xs)    *(y_p(ys+1)-curr_y)*(x_p(xs+1)-curr_x) +   &
+			press_pert(k,ys+1,xs)  *(curr_y-y_p(ys))  *(x_p(xs+1)-curr_x) +   &
+			press_pert(k,ys,xs+1)  *(y_p(ys+1)-curr_y)*(curr_x-x_p(xs)) +   &
+			press_pert(k,ys+1,xs+1)*(curr_y-y_p(ys))  *(curr_x-x_p(xs)) )
+		rr(k,i) = rr(k,i) + 2.*p_u
+            end do
+
+	end if
+	end if
+
+         end do
+
+
+
+! Add in velocity perturbation
+         do i=1, nEdges
+            cell1 = CellsOnEdge(1,i)
+            cell2 = CellsOnEdge(2,i)
+            if(cell1 <= nCellsSolve .or. cell2 <= nCellsSolve) then
+
+            curr_y  = yEdge(i) - ybndS
+	    curr_x  = xEdge(i)
+! Just do ghost cells now.
+	if(curr_y .lt. 0) curr_y = -curr_y
+	if(curr_y .gt. ybndN) curr_y = 2.*ybndN - curr_y
+
+	    ys = bin_search(y_p,ny/4 + 2, curr_y)
+	    xs = bin_search(x_p,nx + 2, curr_x)
+
+!	if(curr_y .gt. 7000.*1000) then
+!	if((curr_x .gt. 4000.*1000) .and. (curr_x .lt. 6500.*1000)) then
+!	write(0,*) 'Check bin'
+!	write(0,*) 'Curr x is ', curr_x
+!	write(0,*) 'Curr y is ', curr_y
+!	write(0,*) xs, ys
+!	write(0,*) x_p(xs), y_p(ys)
+!	write(0,*) ' '
+
+!	end if
+!	end if
+
+	if((ys .gt. 0) .and. (ys .lt. ny/4+2)) then
+	if((xs .gt. 0) .and. (xs .lt. nx+2)) then
+
+            do k=1,nz1
+		p_u = dyy**(-2) * &
+		(	u_pert(k,ys,xs)    *(y_p(ys+1)-curr_y)*(x_p(xs+1)-curr_x) +   &
+			u_pert(k,ys+1,xs)  *(curr_y-y_p(ys))  *(x_p(xs+1)-curr_x) +   &
+			u_pert(k,ys,xs+1)  *(y_p(ys+1)-curr_y)*(curr_x-x_p(xs)) +   &
+			u_pert(k,ys+1,xs+1)*(curr_y-y_p(ys))  *(curr_x-x_p(xs)) )   
+		p_v = dyy**(-2) * &
+		(	v_pert(k,ys,xs)    *(y_p(ys+1)-curr_y)*(x_p(xs+1)-curr_x) +   &
+			v_pert(k,ys+1,xs)  *(curr_y-y_p(ys))  *(x_p(xs+1)-curr_x) +   &
+			v_pert(k,ys,xs+1)  *(y_p(ys+1)-curr_y)*(curr_x-x_p(xs)) +   &
+			v_pert(k,ys+1,xs+1)*(curr_y-y_p(ys))  *(curr_x-x_p(xs)) )   
+
+	        u(k,i) = u(k,i) + &
+			cos(angleEdge(i)) * 2.*p_u + &
+			sin(angleEdge(i)) * 2.*p_v
+            end do
+	end if
+	end if
+
+            end if
+         end do
+
+
+ end if ! End read external file if statement
+
+! Here we could add a temperature perturbation to excite a baroclinic wave 
+	write(0,*) 'delt for baroclinic perturbation is ', delt
+      do i=1, nCells
+!           xloc = xCell(i) - xmid
+           xloc = xCell(i)/(138.0* xCell(1))
+           yloc = yCell(i) - ymid !supercell setting
+
+        do k = 1,nz1
+          ztemp     = .5*(zgrid(k+1,i)+zgrid(k,i))
+          rad =sqrt((yloc/radx)**2+((ztemp-zcent)/radz)**2)
+          if(rad.lt.1)  then
+            thi(k,i) = thi(k,i) + delt*(cos(.5*pii*rad)**2)*cos(xloc*2*pii+pii)
+!            thi(k,i) = thi(k,i) + delt*(cos(.5*pii*rad)**2)
+          end if
+           t (k,i) = thi(k,i)
+        end do
+      end do
+! End baroclinic wave perturbations
+
+! We now readjust the perturbation variables 
+            write(0,*) "pp-check before iter", pp(:,40) 
+            write(0,*) "pi-check before iter", p(:,40) 
+
+!	write(0,*) 'Full rho in some column'
+!	write(0,*) rr(:,1) + rb(:,1)
+
+      do itr=1,30
+
+!        pitop = 1.-.5*dzw(1)*gravity*(1.+scalars(index_qv,1,1))/(cp*t(1,1)*zz(1,1))
+!        do k=2,nz1
+!          pitop = pitop-dzu(k)*gravity/(cp*cqw(k,1)*.5*(t (k,1)+t (k-1,1)) &
+!                                                  *.5*(zz(k,1)+zz(k-1,1)))
+!        end do
+!        pitop = pitop - .5*dzw(nz1)*gravity*(1.+scalars(index_qv,nz1,1))/(cp*t(nz1,1)*zz(nz1,1))
+!        ptop = p0*pitop**(1./rcp)
+!        write(0,*) 'ptop  = ',.01*ptop, .01*ptopb
+
+!        call mpas_dmpar_bcast_real(dminfo, ptop)
+
+        do i = 1,nCells
+
+        pitop = (p_surf(i)/p0)**rcp-.5*dzw(1)*gravity*(1.+scalars(index_qv,1,i))/(cp*t(1,i)*zz(1,i))
+        do k=2,nz1
+!          pitop = pitop-dzu(k)*gravity/(cp*cqw(k,i)*.5*(t (k,i)+t (k-1,i)) &
+!                                                  *.5*(zz(k,i)+zz(k-1,i)))
+          pitop = pitop-dzu(k)*gravity/(cp*cqw(k,i)*(fzm(k)*t (k,i)+fzp(k)*t (k-1,i)) &
+                                                   *(fzm(k)*zz(k,i)+fzp(k)*zz(k-1,i)))
+        end do
+        pitop = pitop - .5*dzw(nz1)*gravity*(1.+scalars(index_qv,nz1,i))/(cp*t(nz1,i)*zz(nz1,i))
+
+        ptop = p0*pitop**(1./rcp)
+!        if(i == 102) write(0,*) 'At center of domain, ptop  = ',.01*ptop, .01*ptopb
+
+           pp(nz1,i) = ptop-ptopb+.5*dzw(nz1)*gravity*   &
+                       (rr(nz1,i)+(rr(nz1,i)+rb(nz1,i))*scalars(index_qv,nz1,i))
+          do k=nz1-1,1,-1
+               pp(k,i) = pp(k+1,i)+dzu(k+1)*gravity*(    &
+                            fzm(k+1)*(rb(k+1,i)*(scalars(index_qv,k+1,i)-qvb(k+1))    &
+                                     +rr(k+1,i)*(1.+scalars(index_qv,k+1,i)))         &
+                           +fzp(k+1)*(rb(k  ,i)*(scalars(index_qv,k  ,i)-qvb(k))      &
+                                     +rr(k  ,i)*(1.+scalars(index_qv,k  ,i))))
+!              pp(k,i) = pp(k+1,i)+dzu(k+1)*gravity*                   &
+!                            (fzm(k)*(rr(k  ,i)+(rr(k  ,i)+rb(k  ,i))*scalars(index_qv,k  ,i))  &
+!                            +fzp(k)*(rr(k+1,i)+(rr(k+1,i)+rb(k+1,i))*scalars(index_qv,k+1,i)))
+          end do
+
+!          if (itr==1.and.i==40) then
+          if (i==40) then
+!          do k=1,nz1
+          write(0,*) "pp-check", pp(30,i) 
+!          end do
+          end if
+           do k=1,nz1
+              rt(k,i) = (pp(k,i)/(rgas*zz(k,i))                   &
+                      -rtb(k,i)*(p(k,i)-pb(k,i)))/p(k,i)
+!	     rt(k,i) = rr(k,i)*t(k,i) + rb(k,i)*(t(k,i)-tb(k,i))
+              p (k,i) = (zz(k,i)*(rgas/p0)*(rtb(k,i)+rt(k,i)))**rcv
+              rr(k,i) = (rt(k,i)-rb(k,i)*(t(k,i)-tb(k,i)))/t(k,i)
+           end do
+
+        end do ! loop over cells
+
+      end do !  iteration loop
+            write(0,*) "pp-check after iter", pp(:,40) 
+            write(0,*) "pi-check after iter", p(:,40) 
+
+	write(0,*) 'Full p in some column'
+	write(0,*) pp(:,55) + ppb(:,55)
+	write(0,*) 'Full rho in some column'
+	write(0,*) rr(:,55) + rb(:,55)
+!	write(0,*) 'r*t pert in cell 40 is'
+!	write(0,*) rt(:,40)
+	write(0,*) 'pp in cell 28650'
+	write(0,*) pp(:,28650)
+	write(0,*) 'Full rho in some column'
+	write(0,*) rr(:,1) + rb(:,1)
+
+!----------------------------------------------------------------------
+!
+      do k=1,nz1
+         qv_init(k) = scalars(index_qv,k,1)
+      end do
+
+      t_init_1d(:) = t(:,1)
+      call mpas_dmpar_bcast_reals(dminfo, nz1, t_init_1d)
+      call mpas_dmpar_bcast_reals(dminfo, nz1, qv_init)
+
+      do i=1,nCells
+         do k=1,nz1
+            t_init(k,i) = t_init_1d(k)
+            rho_zz(k,i) = rb(k,i)+rr(k,i)
+         end do
+      end do
+
+      do i=1,nEdges
+        cell1 = cellsOnEdge(1,i)
+        cell2 = cellsOnEdge(2,i)
+        if(cell1 <= nCellsSolve .or. cell2 <= nCellsSolve) then
+          do k=1,nz1
+            ru (k,i)  = 0.5*(rho_zz(k,cell1)+rho_zz(k,cell2))*u(k,i)    
+          end do
+        end if
+      end do
+
+
+      !
+      !  we are assuming w and rw are zero for this initialization
+      !  i.e., no terrain
+      !
+       rw = 0.0
+       w = 0.0
+
+       zb = 0.0
+       zb3 = 0.0
+
+      !
+      ! Compute mass fluxes tangential to each edge (i.e., through the faces of dual grid cells)
+      !
+      v(:,:) = 0.0
+      do iEdge = 1, nEdges
+         do i=1,nEdgesOnEdge(iEdge)
+            eoe = edgesOnEdge(i,iEdge)
+            if (eoe > 0) then
+               do k = 1, nVertLevels
+                 v(k,iEdge) = v(k,iEdge) + weightsOnEdge(i,iEdge) * u(k, eoe)
+              end do
+            end if
+         end do
+      end do
+
+     ! write(0,*) ' k,u_init, t_init, qv_init '
+     ! do k=1,nVertLevels
+     !   write(0,'(i2,3(2x,f14.10)') k,u_init(k),t_initk),qv_init(k)
+     ! end do
+
+      ! Compute rho and theta from rho_zz and theta_m
+      do iCell=1,nCells
+         do k=1,nVertLevels
+            rho(k,iCell) = rho_zz(k,iCell) * zz(k,iCell)
+            theta(k,iCell) = t(k,iCell) / (1.0 + 1.61 * scalars(index_qv,k,iCell))
+         end do
+      end do
+! We don't need these anymore
+	deallocate(y_in)
+	deallocate(surf_in)
+	deallocate(u_in)
+	deallocate(v_in)
+	deallocate(p_in)
+	deallocate(theta_in)
+	deallocate(u_pert)
+	deallocate(v_pert)
+	deallocate(press_pert)
+	deallocate(theta_pert)
+	deallocate(x_p)
+	deallocate(y_p)
+
+   end subroutine init_atm_case_planar_baro
+
+!----------------------------------------------------------------------------------------------------------
 
    subroutine init_atm_case_gfs(block, mesh, nCells, nEdges, nVertLevels, fg, state, diag, diag_physics, init_case, dims, configs)
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -4687,5 +5534,331 @@ write(0,*) 'PROCESSING SEAICE'
 
    end subroutine decouple_variables
 
+
+   subroutine init_sym_boundary(mesh, state, diag,nCells,p_surf)
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! Sets symmetric boundary condition for theta, u, and f
+   ! These are defined at the cell center, edge, and vertex
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      type (mpas_pool_type), intent(inout) :: mesh
+      type (mpas_pool_type), intent(inout) :: state
+      type (mpas_pool_type), intent(inout) :: diag
+      integer, intent(in) :: nCells
+
+	real (kind=RKIND), dimension(:,:),pointer :: thet,u,p
+	real (kind=RKIND), dimension(:),pointer :: fVertex
+	real (kind=RKIND), dimension(nCells) :: p_surf
+
+	integer, dimension(:),pointer :: isGhostCell,isGhostEdge,isGhostVertex, symmetricCell,symmetricEdge,symmetricVertex
+	real, dimension(:),pointer :: angleEdge
+	integer :: iLoop
+	integer, pointer :: nEdges,nVertices
+
+	real(kind=8), parameter :: pi = 4. * atan(1.0)
+
+      call mpas_pool_get_array(state, 'theta_m', thet)
+      call mpas_pool_get_array(diag, 'exner', p)
+      call mpas_pool_get_array(state, 'u', u)
+      call mpas_pool_get_array(mesh, 'fVertex', fVertex)
+
+      call mpas_pool_get_array(mesh, 'angleEdge', angleEdge)
+
+      call mpas_pool_get_array(mesh, 'isGhostCell', isGhostCell)
+      call mpas_pool_get_array(mesh, 'isGhostEdge', isGhostEdge)
+      call mpas_pool_get_array(mesh, 'isGhostVertex', isGhostVertex)
+
+      call mpas_pool_get_array(mesh, 'symmetricCell', symmetricCell)
+      call mpas_pool_get_array(mesh, 'symmetricEdge', symmetricEdge)
+      call mpas_pool_get_array(mesh, 'symmetricVertex', symmetricVertex)
+
+      call mpas_pool_get_dimension(mesh, 'nEdges', nEdges)
+      call mpas_pool_get_dimension(mesh, 'nVertices', nVertices)
+
+! Loop over cells
+	do iLoop = 1, nCells
+	  if(isGhostCell(iLoop) == 1) then ! Overwrite with data from symmetricCell
+	    thet(:,iLoop) = thet(:,symmetricCell(iLoop))
+	    p(:,iLoop) = p(:,symmetricCell(iLoop))
+	    p_surf(iLoop) = p_surf(symmetricCell(iLoop))
+	  end if
+	end do
+
+! Loop over edges
+	do iLoop = 1, nEdges
+!	  if(iLoop .lt. 150) then
+!		write(0,*) 'Edge loop'
+!		write(0,*) iLoop,symmetricEdge(iLoop)
+!	  end if
+
+	  if(isGhostEdge(iLoop) == 1) then ! Overwrite with data from symmetricEdge
+	    if(angleEdge(iLoop) .eq. pi / 2.) then
+	      if(symmetricEdge(iLoop) .eq. iLoop) then 
+		! We lie ON the boundary, no flow
+		u(:,iLoop) = 0.0
+	      else
+	        u(:,iLoop) = -u(:,symmetricEdge(iLoop))
+	      end if
+	    else
+	        u(:,iLoop) = u(:,symmetricEdge(iLoop))
+	    end if
+
+	  end if
+	end do
+
+! Loop over vertices
+	do iLoop = 1, nVertices
+!	  if(iLoop .lt. 100) then
+!		write(0,*) 'Vertex loop'
+!		write(0,*) iLoop,symmetricVertex(iLoop)
+!	  end if
+
+	  if(isGhostVertex(iLoop) == 1) then ! Overwrite with data from symmetricVertex
+	    if(symmetricVertex(iLoop) .eq. iLoop) then
+	      ! We lie ON the boundary
+	      fVertex(iLoop) = 0.0
+	    else
+	      fVertex(iLoop) = fVertex(symmetricVertex(iLoop))
+	    end if
+	  end if
+	end do
+
+   end subroutine init_sym_boundary
+!***********************************************************************
+
+ subroutine read_input_jet(y, p_s, u, v, p, theta, nz, ny)
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! Reads in input jet
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ implicit none
+
+ integer, intent(in) :: nz, ny
+ real, dimension(nz,ny), intent(inout) :: u, v, p, theta
+ real, dimension(ny), intent(inout) :: y, p_s
+
+! Local parameters
+ integer :: i,j,k
+ integer*8 ny_in,nz_in
+ real*8, dimension(ny,nz) :: field_in
+ real*8, dimension(ny) :: field_in1d
+ real, dimension(nz,ny) :: press_local,rho_local
+
+
+! Read in from file
+   OPEN(unit=10, file='input_jet', form='unformatted', status='old')
+   REWIND(10)
+   read(10) ny_in,nz_in
+   if((ny_in /= ny ) .or. (nz_in /= nz)) then
+     write(0,*) ' error in input jet dimensions '
+     write(0,*) ' ny, ny_input, nz, nz_input ', ny, ny_in, nz,nz_in
+     write(0,*) ' error exit '
+     call wrf_error_fatal ( ' error in input jet dimensions ' )
+   else
+     write(0,*) ' ny_in, nz_in are ', ny_in, nz_in
+   end if
+
+!write(0,*) 'Fine here'
+
+   read(10) field_in1d
+   do j=1,ny
+     y(j) = field_in1d(j)
+   enddo
+
+!write(0,*) 'Fine here'
+
+   read(10) field_in1d
+   do j=1,ny
+     p_s(j) = field_in1d(j)
+   enddo
+
+!write(0,*) 'Fine here'
+
+   read(10) field_in
+   do j=1,ny
+   do k=1,nz
+     u(k,j) = field_in(j,k)
+   enddo
+   enddo
+
+!write(0,*) 'Fine here'
+
+   read(10) field_in
+   do j=1,ny
+   do k=1,nz
+     theta(k,j) = field_in(j,k)
+   enddo
+   enddo
+
+!write(0,*) 'Fine here'
+
+   read(10) field_in
+   do j=1,ny
+   do k=1,nz
+     p(k,j) = field_in(j,k)
+   enddo
+   enddo
+
+!write(0,*) 'Fine here'
+
+! Explicitly set all of v to 0
+	v(:,:) = 0.0
+
+
+! One more thing - let's set u from the pressure
+!   press_local(:,:) = (p(:,:)**(cp/rgas)) * 1.e5
+!   rho_local(:,:) = press_local(:,:)/(rgas*p(:,:)*theta(:,:))
+!	write(0,*) 'some values of press_loc'
+!	write(0,*) press_local(:,350)
+!	write(0,*) 'some values of rho_loc'
+!	write(0,*) rho_local(:,350)
+!
+!   do j = 2,ny-1
+!      u(:,j) = -(press_local(:,j+1) - press_local(:,j-1))	&
+!			/(1.e-4*2.*rho_local(:,j)*(y(2) - y(1)))
+!   end do
+!   u(:,1) = 0.0
+!   u(:,ny) = 0.0
+
+
+write(0,*) 'Returning from read in'
+ end subroutine read_input_jet
+
+!***********************************************************************
+
+ subroutine read_perturbation(x, y, u, v, p, theta, nz, ny, nx, dy,xmax,ymax)
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! Reads in perturbation
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ implicit none
+
+ integer, intent(in) :: nz, ny, nx
+ real, dimension(nz,ny,nx), intent(out) :: u, v, p, theta
+ real, dimension(nx), intent(out) :: x
+ real, dimension(ny), intent(out) :: y
+ real, intent(in) :: dy,xmax,ymax
+
+! Local parameters
+ integer :: i,j,k
+ real*8, dimension(ny,nz) :: field_in
+ real :: dyy
+
+! Read in from file
+   OPEN(unit=13, file='external_pert.txt', status='unknown')
+   do k = 1,nz
+    do j = 2,ny-1
+     do i = 2,nx-1
+	read(13,*) u(k,j,i), v(k,j,i), p(k,j,i), theta(k,j,i)
+     end do
+    end do
+   end do
+
+! Ensure periodicity
+
+! in y
+	p(:,1,:) = p(:,ny-1,:)
+	p(:,ny,:) = p(:,2,:)
+	theta(:,1,:) = theta(:,ny-1,:)
+	theta(:,ny,:) = theta(:,2,:)
+	u(:,1,:) = u(:,ny-1,:)
+	u(:,ny,:) = u(:,2,:)
+	v(:,1,:) = v(:,ny-1,:)
+	v(:,ny,:) = v(:,2,:)
+! in x
+	p(:,:,1) = p(:,:,nx-1)
+	p(:,:,nx) = p(:,:,2)
+	theta(:,:,1) = theta(:,:,nx-1)
+	theta(:,:,nx) = theta(:,:,2)
+	u(:,:,1) = u(:,:,nx-1)
+	u(:,:,nx) = u(:,:,2)
+	v(:,:,1) = v(:,:,nx-1)
+	v(:,:,nx) = v(:,:,2)
+
+! Don't bother with the corners
+
+
+  write(0,*) 'Check pert max and min to ensure things are working...'
+  write(0,*) 'Max of perturbations'
+  write(0,*) 'Max pert of u is: ', maxval(u(:,:,:))
+  write(0,*) 'Max pert of v is: ', maxval(v(:,:,:))
+  write(0,*) 'Max pert of pressure is: ', maxval(p(:,:,:))
+  write(0,*) 'Max pert of theta is: ', maxval(theta(:,:,:))
+  write(0,*) 'Min of perturbations'
+  write(0,*) 'Min pert of u is: ', minval(u(:,:,:))
+  write(0,*) 'Min pert of v is: ', minval(v(:,:,:))
+  write(0,*) 'Min pert of pressure is: ', minval(p(:,:,:))
+  write(0,*) 'Min pert of theta is: ', minval(theta(:,:,:))
+
+! Finally, set x_p and y_p
+! These have cells 4x the size of the read-in jet
+	dyy = 4.*dy
+!	dyy = xmax/(nx-2)
+
+
+  do j = 2,ny-1
+    y(j) = (real(j) - 1.5)*dyy
+  end do
+
+  do i = 2,nx-1
+    x(i) = (real(i) - 1.5)*dyy
+  end do
+
+
+	x(1) = -0.5*dyy
+	x(nx) = (real(nx) - 1.5)*dyy
+	y(1) = -0.5*dyy
+	y(ny) = (real(ny) - 1.5)*dyy
+
+	x(:) = (x(:) + xmax/2.)*.5
+	y(:) = (y(:) + ymax/2.)*.5
+
+!	write(0,*) 'Here is x', x
+!	write(0,*) 'And here is y', y
+
+   write(0,*) 'Finished reading in PV anomaly.'
+ end subroutine read_perturbation
+
+!***********************************************************************
+!
+!  subroutine bin_search
+!
+!> \brief   Seek out y values needed for horizontal interpolation
+!> \author  Maximo Menchaca
+!> \date    09/12/13
+!> \details 
+!> This routine performs a binary search in y for the nearest values to key for use for linear interpolation
+!> We assume that y always has values greater than AND less than key
+!
+!-----------------------------------------------------------------------
+   integer function bin_search(y, ny, key)
+
+      implicit none
+
+      integer, intent(in) :: ny
+      real, intent(in) :: key
+      real (kind=RKIND), dimension(ny), intent(in) :: y
+
+      integer :: l, u, k
+
+      bin_search = ny+1
+
+      l = 1
+      u = ny
+      k = (l+u)/2
+      do while (u >= l)
+	 if(y(k) == key) then
+	   bin_search = k
+            exit
+	 else if(y(k) < key .and. y(k+1) > key) then
+	   bin_search = k
+	    exit
+	 else if(y(k) < key) then
+	   l = k+1
+	   k = (l+u)/2
+	 else
+	   u = k - 1
+	   k = (l+u)/2
+	 end if
+      end do
+
+   end function bin_search
 
 end module init_atm_cases

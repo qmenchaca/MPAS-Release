@@ -130,7 +130,12 @@ ifort:
 	"CORE = $(CORE)" \
 	"DEBUG = $(DEBUG)" \
 	"USE_PAPI = $(USE_PAPI)" \
-	"CPPFLAGS = $(MODEL_FORMULATION) -D_MPI -DUNDERSCORE" )
+	"CPPFLAGS = $(MODEL_FORMULATION) -D_MPI -DUNDERSCORE" \
+	"PIO = /usr/rels/PIO" \
+	"PNETCDF = /usr/rels/ParIO" \
+	"NETCDF = /usr" \
+	"MPAS_EXTERNAL_LIBS = -L${PIO}/lib -L${PNETCDF}/lib -L/usr/lib/x86_64-linux-gnu -lhdf5_hl -lhdf5 -ldl -lz" \
+	"MPAS_EXTERNAL_INCLUDES=-I${PIO}/include -I${PNETCDF}/include" )
 
 ifort-gcc:
 	( $(MAKE) all \
@@ -310,7 +315,7 @@ ifneq "$(NETCDF)" ""
 	LIBS += -L$(NETCDF)/lib
 	NCLIB = -lnetcdf
 	NCLIBF = -lnetcdff
-	ifneq ($(wildcard $(NETCDF)/lib/libnetcdff.*), ) # CHECK FOR NETCDF4
+	ifneq ($(wildcard $(NETCDF)/lib/x86_64-linux-gnu/libnetcdff.*), ) # CHECK FOR NETCDF4
 		LIBS += $(NCLIBF)
 	endif # CHECK FOR NETCDF4
 	LIBS += $(NCLIB)

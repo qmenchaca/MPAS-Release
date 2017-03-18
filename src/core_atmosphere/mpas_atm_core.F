@@ -178,7 +178,7 @@ module atm_core
          if (trim(config_stop_time) /= "none") then
             call mpas_set_time(curr_time=stopTime, dateTimeString=config_stop_time, ierr=local_err)
             if(startTime + runduration /= stopTime) then
-               write(0,*) 'Warning: config_run_duration and config_stop_time are inconsitent: using config_run_duration.'
+               write(0,*) 'Warning: config_run_duration and config_stop_time are inconsistent: using config_run_duration.'
             end if
          end if
       else if (trim(config_stop_time) /= "none") then
@@ -230,7 +230,7 @@ module atm_core
       real (kind=RKIND), dimension(:), pointer :: meshScalingDel2, meshScalingDel4, areaCell, invAreaCell
       character(len=StrKIND), pointer :: mminlu
 
-      integer, pointer :: nEdgesSolve, nCells
+      integer, pointer :: nEdgesSolve, nCells,config_dfi
    
       logical, pointer :: config_do_restart, config_do_DAcycling
 
@@ -240,6 +240,7 @@ module atm_core
 
       call mpas_pool_get_config(block % configs, 'config_do_restart', config_do_restart)
       call mpas_pool_get_config(block % configs, 'config_do_DAcycling', config_do_DAcycling)
+      call mpas_pool_get_config(block % configs, 'config_dfi', config_dfi)
 
       call mpas_pool_get_array(mesh, 'areaCell', areaCell)
       call mpas_pool_get_array(mesh, 'invAreaCell', invAreaCell)
@@ -272,36 +273,9 @@ module atm_core
                            )
    
 #ifdef DO_PHYSICS
-      !check that all the physics options are correctly defined and that at least one physics
-      !parameterization is called (using the logical moist_physics):
-      call physics_namelist_check(mesh, block % configs)
-
-      !proceed with initialization of physics parameterization if moist_physics is set to true:
-      call mpas_pool_get_subpool(block % structs, 'sfc_input', sfc_input)
-
-      ! Before calling physics_init, ensure that mminlu contains the name of the land use dataset
-      call mpas_pool_get_array(sfc_input, 'mminlu', mminlu)
-      if (len_trim(mminlu) == 0) then
-            write(0,*) '****************************************************************'
-            write(0,*) 'No information on land use dataset is available.'
-            write(0,*) 'Assume that we are using ''USGS''.'
-            write(0,*) '****************************************************************'
-            write(mminlu,'(a)') 'USGS'
-      end if
-
-
-      if (moist_physics) then
-         !initialization of some input variables in registry:
-         call mpas_pool_get_subpool(block % structs, 'tend', tend)
-         call mpas_pool_get_subpool(block % structs, 'diag_physics', diag_physics)
-         call mpas_pool_get_subpool(block % structs, 'atm_input', atm_input)
-         call physics_registry_init(mesh, block % configs, sfc_input)
-         call physics_run_init(block % configs, mesh, state, clock, stream_manager)
-
-         !initialization of all physics:
-         call physics_init(dminfo, clock, block % configs, mesh, diag, tend, state, 1, diag_physics, &
-                           atm_input, sfc_input)
-      endif
+	if(config_dfi .eq. 0) then
+          call atm_core_init_physics(block,dminfo,stream_manager,mesh)
+	end if ! End check for DFI
 #endif
    
       call atm_compute_mesh_scaling(mesh, block % configs)
@@ -361,6 +335,7 @@ module atm_core
       call mpas_pool_get_config(domain % blocklist % configs, 'config_do_restart', config_do_restart)
       call mpas_pool_get_config(domain % blocklist % configs, 'config_restart_timestamp_name', config_restart_timestamp_name)
 
+
       ! Avoid writing a restart file at the initial time
       call MPAS_stream_mgr_reset_alarms(domain % streamManager, streamID='restart', direction=MPAS_STREAM_OUTPUT, ierr=ierr)
 
@@ -393,7 +368,6 @@ module atm_core
       end if
       call mpas_stream_mgr_reset_alarms(domain % streamManager, direction=MPAS_STREAM_OUTPUT, ierr=ierr)
 
-
       ! During integration, time level 1 stores the model state at the beginning of the
       !   time step, and time level 2 stores the state advanced dt in time by timestep(...)
       itimestep = 1
@@ -401,6 +375,18 @@ module atm_core
 
          currTime = mpas_get_clock_time(clock, MPAS_NOW, ierr)
          call mpas_get_time(curr_time=currTime, dateTimeString=timeStamp, ierr=ierr)         
+
+      ! Accumulate values in the DFI arrays before we do the timestep
+            block_ptr => domain % blocklist
+            do while (associated(block_ptr))
+
+               call mpas_pool_get_subpool(block_ptr % structs, 'state', state)
+               call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+               call atm_accum_dfi(state, diag, itimestep)
+
+               block_ptr => block_ptr % next
+            end do
+
 
          write(0,*) ' '
          write(0,*) 'Begin timestep ', trim(timeStamp)
@@ -485,7 +471,7 @@ module atm_core
             call mpas_dmpar_global_abort('********************************************************************************')
          end if
 
-         ! Only after we've successfully written the restart file should we we
+         ! Only after we've successfully written the restart file should we
          !    write the restart_timestamp file
          if (MPAS_stream_mgr_ringing_alarms(domain % streamManager, streamID='restart', direction=MPAS_STREAM_OUTPUT, ierr=ierr)) then
             if (domain % dminfo % my_proc_id == 0) then
@@ -500,7 +486,278 @@ module atm_core
       end do
    
    end function atm_core_run
+
+
    
+   function atm_core_dfi(domain) result(ierr)
+   
+      use mpas_timekeeping
+      use mpas_kind_types
+      use mpas_stream_manager
+      use mpas_derived_types, only : MPAS_STREAM_LATEST_BEFORE, MPAS_STREAM_INPUT, MPAS_STREAM_INPUT_OUTPUT
+      use mpas_timer
+
+#ifdef DO_PHYSICS
+!     use mpas_atmphys_aquaplanet
+      use mpas_atmphys_control
+      use mpas_atmphys_init
+      use mpas_atmphys_manager
+#endif
+   
+      implicit none
+   
+      type (domain_type), intent(inout) :: domain
+      integer :: ierr
+   
+      real (kind=RKIND), pointer :: dt,dt_dfi,dfi_cutoff_seconds
+      integer, pointer :: config_dfi,dfi_filt_choice,dfi_time_dim,dfi_state
+      logical, pointer :: config_do_restart
+      type (block_type), pointer :: block_ptr
+
+      type (MPAS_Time_Type) :: currTime
+      character(len=StrKIND) :: timeStamp,temp_phys
+      character (len=StrKIND), pointer :: config_restart_timestamp_name,xtime
+      character (len=StrKIND), pointer :: dfi_duration,config_phys_dfi
+      integer :: nsteps
+
+      integer :: stream_dir
+      integer :: ierr_int
+      character(len=StrKIND) :: input_stream, read_time
+
+      type (mpas_pool_type), pointer :: state, diag, diag_physics, mesh
+      type (MPAS_Clock_type) :: dfi_clock,temp_clock
+      type (MPAS_TimeInterval_type) :: dt_MTI,dfi_dur_MTI,rem_MTI
+      type (MPAS_Time_type) :: reftime_MTI
+
+      type (mpas_pool_type), pointer :: sfc_input
+      type (mpas_pool_type), pointer :: tend
+      type (mpas_pool_type), pointer :: atm_input
+      character(len=StrKIND), pointer :: mminlu
+      character (len=StrKIND) :: startTimeStamp
+
+      ! For high-frequency diagnostics output
+      character (len=StrKIND) :: tempfilename
+
+      ierr = 0
+
+      call mpas_pool_get_config(domain % blocklist % configs, 'config_dfi', config_dfi)
+	if(config_dfi .ne. 0) then
+
+	  call mpas_pool_get_config(domain % blocklist % configs,'dt_dfi',dt_dfi)
+	  if(dt_dfi .eq. 0) then
+            call mpas_pool_get_config(domain % blocklist % configs, 'config_dt', dt)
+	    dt_dfi => dt
+	  end if
+
+! Recover filter weights
+            call mpas_pool_get_config(domain % blocklist % configs, 'dfi_time_dim', dfi_time_dim)
+            call mpas_pool_get_config(domain % blocklist % configs, 'dfi_cutoff_seconds', dfi_cutoff_seconds)
+            call mpas_pool_get_config(domain % blocklist % configs, 'dfi_filt_choice', dfi_filt_choice)
+
+
+	SELECT CASE(config_dfi)
+	  CASE(1) ! Forward filter option
+! This is an easy case to set up.
+! Run forward with full physics.
+	  write(0,*) 'DFI: Forward filter option.'
+            call mpas_pool_get_config(domain % blocklist % configs, 'dfi_fwd_duration', dfi_duration)
+	call mpas_set_time(reftime_MTI,YYYY=1,MM=1,DD=1)
+	call mpas_set_timeInterval(dt_MTI,dt=dt_dfi)
+	call mpas_set_timeInterval(dfi_dur_MTI,timeString=dfi_duration)
+	call mpas_interval_division(reftime_MTI,dfi_dur_MTI,dt_MTI,nsteps,rem_MTI)
+
+	write(0,*) 'Array size of filter is', nsteps
+
+            block_ptr => domain % blocklist
+            do while (associated(block_ptr))
+
+               call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+               call get_filter_wgts(diag,dt_dfi,nsteps,dfi_cutoff_seconds,dfi_filt_choice)
+
+               block_ptr => block_ptr % next
+            end do
+
+            call mpas_pool_get_config(domain % blocklist % configs, 'config_physics_suite', config_phys_dfi)
+	temp_phys=config_phys_dfi
+
+	CALL atm_dfi_clock_init(dfi_clock,domain % blocklist % configs,dt_dfi,1,ierr_int)
+! Create a copy of domain's clock settings
+	temp_clock = domain % clock
+! Feed the domain the dfi clock
+	domain % clock = dfi_clock
+
+	! Call atm_core_run for the time specified by forward init
+	ierr_int = domain % core % core_run(domain)
+
+	  CASE(2) ! Diabatic filter option
+! Run backward adiabatically (no filter),
+! then forward with full physics (filter on).
+	  write(0,*) 'DFI: Diabatic filter option.'
+
+! Set dfi state to be -1 (this is backwards)
+            block_ptr => domain % blocklist
+            do while (associated(block_ptr))
+
+               call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+               call mpas_pool_get_array(diag, 'dfi_state', dfi_state)
+	       dfi_state = -1
+
+               block_ptr => block_ptr % next
+            end do
+
+	CALL atm_dfi_clock_init(dfi_clock,domain % blocklist % configs,-1.0*dt_dfi,dfi_state,ierr_int)
+	dfi_clock % direction = MPAS_BACKWARD
+! Create a copy of domain's clock settings
+	temp_clock = domain % clock
+! Feed the domain the dfi clock
+	domain % clock = dfi_clock
+
+	! Call atm_core_run for the time specified by backward init (no filter)
+	! This run must be adiabatic, so turn off the physics
+            call mpas_pool_get_config(domain % blocklist % configs, 'config_physics_suite', config_phys_dfi)
+	temp_phys=config_phys_dfi
+	config_phys_dfi='none' !This is OK to do because temp_phys is NOT a pointer!
+      block_ptr => domain % blocklist
+      do while (associated(block_ptr))
+         call mpas_pool_get_subpool(block_ptr % structs, 'mesh', mesh)
+         call atm_core_init_physics(block_ptr,domain % dminfo,domain % streamManager,mesh)
+
+         call mpas_pool_get_array(state, 'xtime', xtime, 1)
+         xtime = startTimeStamp
+
+         block_ptr => block_ptr % next
+      end do
+
+	ierr_int = domain % core % core_run(domain)
+!TODO
+	! Once the above is complete, call atm_core_run for time specified by forward init
+
+	  CASE(3) ! Twice filter option
+! Run backward adiabatically (with filter),
+! then forward with full physics (with filter).
+	  write(0,*) 'DFI: Twice filter option.'
+
+! Set dfi state to be -1 (this is backwards)
+            block_ptr => domain % blocklist
+            do while (associated(block_ptr))
+
+               call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+               call mpas_pool_get_array(diag, 'dfi_state', dfi_state)
+	       dfi_state = -1
+
+               block_ptr => block_ptr % next
+            end do
+
+	CALL atm_dfi_clock_init(dfi_clock,domain % blocklist % configs,-1.0*dt_dfi,dfi_state,ierr_int)
+	dfi_clock % direction = MPAS_BACKWARD
+! Create a copy of domain's clock settings
+	temp_clock = domain % clock
+! Feed the domain the dfi clock
+	domain % clock = dfi_clock
+!TODO:
+	! Call atm_core_run for the time specified by backward init
+	! Reset the dynamic arrays with the filtered variables
+	! Once the above is complete, call atm_core_run for time specified by forward init
+
+	 CASE DEFAULT
+	  write(0,*) 'Unrecognized digital filter option! Aborting run.'
+            call mpas_dmpar_global_abort('See ya later.')
+	 END SELECT
+
+	! Reset the dynamic arrays with the filtered variables
+            block_ptr => domain % blocklist
+            do while (associated(block_ptr))
+
+               call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+               call mpas_pool_get_subpool(block_ptr % structs, 'state', state)
+               call dfi_array_reset(state,diag)
+
+               block_ptr => block_ptr % next
+            end do
+
+	! We don't need the temporary clocks anymore, get rid of them
+	  domain % clock = temp_clock
+          call mpas_destroy_clock(dfi_clock, ierr)
+	! Is there an orphan clock laying around here now?
+
+	! Reset the physics
+	  config_phys_dfi = temp_phys
+      block_ptr => domain % blocklist
+      do while (associated(block_ptr))
+	write(0,*) 'Setting up physics, if you need it.'
+         call mpas_pool_get_subpool(block_ptr % structs, 'mesh', mesh)
+         call atm_core_init_physics(block_ptr,domain % dminfo,domain % streamManager,mesh)
+
+         call mpas_pool_get_array(state, 'xtime', xtime, 1)
+         xtime = startTimeStamp
+
+         block_ptr => block_ptr % next
+      end do
+	else
+  	 write(0,*) 'No digital filter applied.'
+	end if
+ 
+   end function atm_core_dfi
+   
+
+   subroutine atm_core_init_physics(block,dminfo,stream_manager,mesh)
+      use mpas_stream_manager
+#ifdef DO_PHYSICS
+!     use mpas_atmphys_aquaplanet
+      use mpas_atmphys_control
+      use mpas_atmphys_init
+      use mpas_atmphys_manager
+#endif
+   
+      implicit none
+   
+      type (dm_info), intent(in) :: dminfo
+      type (MPAS_streamManager_type), intent(inout) :: stream_manager
+      type (block_type), intent(inout) :: block
+      type (mpas_pool_type), intent(inout) :: mesh     !MGD does this need to be a pointer?
+
+      type (mpas_pool_type), pointer :: sfc_input
+      type (mpas_pool_type), pointer :: diag_physics
+      type (mpas_pool_type), pointer :: atm_input
+      type (mpas_pool_type), pointer :: state
+      type (mpas_pool_type), pointer :: diag
+      type (mpas_pool_type), pointer :: tend
+      character(len=StrKIND), pointer :: mminlu
+
+
+      !check that all the physics options are correctly defined and that at least one physics
+      !parameterization is called (using the logical moist_physics):
+      call physics_namelist_check(mesh, block % configs)
+
+      !proceed with initialization of physics parameterization if moist_physics is set to true:
+      call mpas_pool_get_subpool(block % structs, 'sfc_input', sfc_input)
+
+      ! Before calling physics_init, ensure that mminlu contains the name of the land use dataset
+      call mpas_pool_get_array(sfc_input, 'mminlu', mminlu)
+      if (len_trim(mminlu) == 0) then
+            write(0,*) '****************************************************************'
+            write(0,*) 'No information on land use dataset is available.'
+            write(0,*) 'Assume that we are using ''USGS''.'
+            write(0,*) '****************************************************************'
+            write(mminlu,'(a)') 'USGS'
+      end if
+
+
+      if (moist_physics) then
+         !initialization of some input variables in registry:
+         call mpas_pool_get_subpool(block % structs, 'tend', tend)
+         call mpas_pool_get_subpool(block % structs, 'diag', diag)
+         call mpas_pool_get_subpool(block % structs, 'state', state)
+         call mpas_pool_get_subpool(block % structs, 'diag_physics', diag_physics)
+         call mpas_pool_get_subpool(block % structs, 'atm_input', atm_input)
+         call physics_registry_init(mesh, block % configs, sfc_input)
+         call physics_run_init(block % configs, mesh, state, clock, stream_manager)
+
+         !initialization of all physics:
+         call physics_init(dminfo, clock, block % configs, mesh, diag, tend, state, 1, diag_physics, &
+                           atm_input, sfc_input)
+      endif
+   end subroutine atm_core_init_physics
    
    subroutine atm_compute_output_diagnostics(state, time_lev, diag, mesh)
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1011,5 +1268,355 @@ module atm_core
       end do ! end loop over edges
 
    end subroutine atm_adv_coef_compression
+
+   subroutine get_filter_wgts( diag,dt,dfi_time_dim,dfi_cutoff,dfi_filt_choice )
+
+      implicit none
+      type (mpas_pool_type), intent(inout) :: diag
+      integer, intent(in) :: dfi_time_dim,dfi_filt_choice
+      real (kind=RKIND), intent(in) :: dfi_cutoff,dt
+      real (kind=RKIND), dimension(1+dfi_time_dim) :: filt_coeff_array
+      real (kind=RKIND), dimension(:), pointer :: dfi_filt_coeff
+      real (kind=RKIND), dimension(:,:), pointer :: dfi_u,dfi_w,dfi_rho_zz,dfi_theta_m
+      real (kind=RKIND), dimension(:), pointer :: dfi_ps
+      real (kind=RKIND), dimension(:,:,:), pointer :: dfi_scalars
+      real (kind=RKIND), pointer :: dfi_filt_accum
+
+      character(len=StrKIND) :: filtertype
+
+! Local variables
+      integer :: nstep, nstep2, nstepmax,i
+	nstep = (1.0 + real(dfi_time_dim))
+	nstep2 = ceiling((1.0 + real(dfi_time_dim))/2.0)
+
+      call mpas_pool_get_array(diag, 'dfi_filt_coeff', dfi_filt_coeff)
+
+	SELECT CASE(dfi_filt_choice)
+	  CASE(0) ! Uniform filter
+	    dfi_filt_coeff(:) = 1.
+	    filtertype = 'Uniform'
+	  CASE(7) ! Dolph filter
+	    call dolph(dt,dfi_cutoff,nstep2-1,filt_coeff_array(:nstep2-1))
+!	    dfi_filt_coeff(:dfi_time_dim+1) = filt_coeff_array(:dfi_time_dim+1)
+	    dfi_filt_coeff(:nstep2-1) = filt_coeff_array(:nstep2-1)
+	    filtertype = 'Dolph'
+	  CASE DEFAULT
+	  write(0,*) 'Unrecognized digital filter option! Aborting run.'
+            call mpas_dmpar_global_abort('See ya later.')
+	END SELECT
+
+	if ( MOD(int(nstep),2) .ne. 0) THEN
+	   do i = 1,nstep2 - 1
+	     dfi_filt_coeff(2*nstep2-i) = dfi_filt_coeff(i)
+	   end do
+	else
+	   do i = 1,nstep2
+	     dfi_filt_coeff(2*nstep2-i+1) = dfi_filt_coeff(i)
+	   end do
+	end if
+
+	  write(0,*) 'Chosen filter is ', trim(filtertype)
+!	  write(0,*) 'Filter wgts:'
+!	  do i = 1,nstep
+!	    write(0,*) 'Time ', i, ', weight: ', dfi_filt_coeff(i)
+!	  end do
+
+! Might as well zero out the dfi arrays here while we are at it.
+      call mpas_pool_get_array(diag, 'dfi_u', dfi_u)
+      call mpas_pool_get_array(diag, 'dfi_w', dfi_w)
+      call mpas_pool_get_array(diag, 'dfi_rho_zz', dfi_rho_zz)
+      call mpas_pool_get_array(diag, 'dfi_theta_m', dfi_theta_m)
+      call mpas_pool_get_array(diag, 'dfi_ps', dfi_ps)
+      call mpas_pool_get_array(diag, 'dfi_scalars', dfi_scalars)
+      call mpas_pool_get_array(diag, 'dfi_filt_accum', dfi_filt_accum)
+
+	dfi_u(:,:) = 0.0
+	dfi_w(:,:) = 0.0
+	dfi_rho_zz(:,:) = 0.0
+	dfi_theta_m(:,:) = 0.0
+	dfi_ps(:) = 0.0
+	dfi_scalars(:,:,:) = 0.0
+	dfi_filt_accum = 0.0
+
+   end subroutine get_filter_wgts
+
+   subroutine atm_accum_dfi ( state,diag,itimestep )
+
+      implicit none
+
+      type (mpas_pool_type), intent(inout) :: state, diag
+      integer :: itimestep
+
+      real (kind=RKIND), dimension(:,:), pointer :: u,w,rho_zz,theta_m
+      real (kind=RKIND), dimension(:), pointer :: m_ps
+      real (kind=RKIND), dimension(:,:,:), pointer :: scalars
+
+      real (kind=RKIND), dimension(:,:), pointer :: dfi_u,dfi_w,dfi_rho_zz,dfi_theta_m
+      real (kind=RKIND), dimension(:), pointer :: dfi_ps
+      real (kind=RKIND), dimension(:,:,:), pointer :: dfi_scalars
+
+      real (kind=RKIND), dimension(:), pointer :: dfi_filt_coeff
+      real (kind=RKIND), pointer :: dfi_filt_accum
+      real (kind=RKIND) :: curr_filt_wgt
+
+
+      call mpas_pool_get_array(state, 'u', u ,1)
+      call mpas_pool_get_array(state, 'w', w ,1)
+      call mpas_pool_get_array(state, 'rho_zz', rho_zz,1)
+      call mpas_pool_get_array(state, 'theta_m', theta_m,1)
+      call mpas_pool_get_array(state, 'm_ps', m_ps,1)
+      call mpas_pool_get_array(state, 'scalars', scalars,1)
+      call mpas_pool_get_array(diag, 'dfi_u', dfi_u)
+      call mpas_pool_get_array(diag, 'dfi_w', dfi_w)
+      call mpas_pool_get_array(diag, 'dfi_rho_zz', dfi_rho_zz)
+      call mpas_pool_get_array(diag, 'dfi_theta_m', dfi_theta_m)
+      call mpas_pool_get_array(diag, 'dfi_ps', dfi_ps)
+      call mpas_pool_get_array(diag, 'dfi_scalars', dfi_scalars)
+
+      call mpas_pool_get_array(diag, 'dfi_filt_coeff', dfi_filt_coeff)
+      call mpas_pool_get_array(diag, 'dfi_filt_accum', dfi_filt_accum)
+
+      curr_filt_wgt = dfi_filt_coeff(itimestep)
+
+      dfi_u(:,:) 	= dfi_u(:,:) 		+ u(:,:)	*curr_filt_wgt
+      dfi_w(:,:) 	= dfi_w(:,:) 		+ w(:,:)	*curr_filt_wgt
+      dfi_rho_zz(:,:) 	= dfi_rho_zz(:,:) 	+ rho_zz(:,:)	*curr_filt_wgt
+      dfi_theta_m(:,:) 	= dfi_theta_m(:,:) 	+ theta_m(:,:)	*curr_filt_wgt
+      dfi_ps(:) 	= dfi_ps(:)	 	+ m_ps(:)	*curr_filt_wgt
+      dfi_scalars(:,:,:)= dfi_scalars(:,:,:) 	+ scalars(:,:,:)*curr_filt_wgt
+
+      dfi_filt_accum	= dfi_filt_accum 	+ 		 curr_filt_wgt
+
+   end subroutine atm_accum_dfi
+
+   subroutine dfi_array_reset ( state,diag )
+
+      implicit none
+
+      type (mpas_pool_type), intent(inout) :: state, diag
+
+      real (kind=RKIND), dimension(:,:), pointer :: u,w,rho_zz,theta_m
+      real (kind=RKIND), dimension(:), pointer :: m_ps
+      real (kind=RKIND), dimension(:,:,:), pointer :: scalars
+
+      real (kind=RKIND), dimension(:,:), pointer :: dfi_u,dfi_w,dfi_rho_zz,dfi_theta_m
+      real (kind=RKIND), dimension(:), pointer :: dfi_ps
+      real (kind=RKIND), dimension(:,:,:), pointer :: dfi_scalars
+
+      real (kind=RKIND), pointer :: dfi_filt_accum
+
+
+      call mpas_pool_get_array(state, 'u', u ,2)
+      call mpas_pool_get_array(state, 'w', w ,2)
+      call mpas_pool_get_array(state, 'rho_zz', rho_zz,2)
+      call mpas_pool_get_array(state, 'theta_m', theta_m,2)
+      call mpas_pool_get_array(state, 'm_ps', m_ps,2)
+      call mpas_pool_get_array(state, 'scalars', scalars,2)
+      call mpas_pool_get_array(diag, 'dfi_u', dfi_u)
+      call mpas_pool_get_array(diag, 'dfi_w', dfi_w)
+      call mpas_pool_get_array(diag, 'dfi_rho_zz', dfi_rho_zz)
+      call mpas_pool_get_array(diag, 'dfi_theta_m', dfi_theta_m)
+      call mpas_pool_get_array(diag, 'dfi_ps', dfi_ps)
+      call mpas_pool_get_array(diag, 'dfi_scalars', dfi_scalars)
+
+      call mpas_pool_get_array(diag, 'dfi_filt_accum', dfi_filt_accum)
+
+
+      u(:,:) 	    = dfi_u(:,:)	/dfi_filt_accum
+      w(:,:) 	    = dfi_w(:,:)	/dfi_filt_accum
+      rho_zz(:,:)   = dfi_rho_zz(:,:)	/dfi_filt_accum
+      theta_m(:,:)  = dfi_theta_m(:,:)	/dfi_filt_accum
+      m_ps(:)       = dfi_ps(:)		/dfi_filt_accum
+      scalars(:,:,:)= dfi_scalars(:,:,:)/dfi_filt_accum
+
+! Just to make sure, let's set BOTH time levels.
+
+      call mpas_pool_get_array(state, 'u', u ,1)
+      call mpas_pool_get_array(state, 'w', w ,1)
+      call mpas_pool_get_array(state, 'rho_zz', rho_zz,1)
+      call mpas_pool_get_array(state, 'theta_m', theta_m,1)
+      call mpas_pool_get_array(state, 'm_ps', m_ps,1)
+      call mpas_pool_get_array(state, 'scalars', scalars,1)
+
+      u(:,:) 	    = dfi_u(:,:)	/dfi_filt_accum
+      w(:,:) 	    = dfi_w(:,:)	/dfi_filt_accum
+      rho_zz(:,:)   = dfi_rho_zz(:,:)	/dfi_filt_accum
+      theta_m(:,:)  = dfi_theta_m(:,:)	/dfi_filt_accum
+      m_ps(:)       = dfi_ps(:)		/dfi_filt_accum
+      scalars(:,:,:)= dfi_scalars(:,:,:)/dfi_filt_accum
+
+	dfi_filt_accum = 0.0
+	dfi_u(:,:) = 0.0
+	dfi_w(:,:) = 0.0
+	dfi_rho_zz(:,:) = 0.0
+	dfi_theta_m(:,:) = 0.0
+	dfi_ps(:) = 0.0
+	dfi_scalars(:,:,:) = 0.0
+
+   end subroutine dfi_array_reset
+
+
+
+   subroutine atm_dfi_clock_init(core_clock, configs, dt, dfi_state, ierr)
+
+      use mpas_timekeeping
+
+      implicit none
+
+      type (MPAS_Clock_type), intent(inout) :: core_clock
+      type (mpas_pool_type), intent(inout) :: configs
+      real (kind=RKIND), intent(in) :: dt
+      integer, intent(in) :: dfi_state
+      integer, intent(out) :: ierr
+
+
+
+      type (MPAS_Time_Type) :: startTime, stopTime, alarmStartTime
+      type (MPAS_TimeInterval_type) :: runDuration, timeStep, alarmTimeStep
+      integer :: local_err
+      real (kind=RKIND), pointer :: config_dt
+      character (len=StrKIND), pointer :: dfi_duration
+      character (len=StrKIND), pointer :: config_start_time
+      character (len=StrKIND) :: startTimeStamp
+
+
+      ierr = 0
+
+      call mpas_pool_get_config(configs, 'config_start_time', config_start_time)
+	if(dfi_state .eq. -1) then
+          call mpas_pool_get_config(configs, 'dfi_bck_duration', dfi_duration)
+	else
+          call mpas_pool_get_config(configs, 'dfi_fwd_duration', dfi_duration)
+	end if
+
+
+      startTimeStamp = config_start_time
+
+
+      call mpas_set_time(curr_time=startTime, dateTimeString=startTimeStamp, ierr=local_err)
+      call mpas_set_timeInterval(timeStep, dt=dt, ierr=local_err)
+
+      if (trim(dfi_duration) /= "none") then
+         call mpas_set_timeInterval(runDuration, timeString=dfi_duration, ierr=local_err)
+         call mpas_create_clock(core_clock, startTime=startTime, timeStep=timeStep, runDuration=runDuration, ierr=local_err)
+      else
+          write(stderrUnit,*) 'Error: DFI duration not specified.'
+          ierr = 1
+      end if
+
+   end subroutine atm_dfi_clock_init
+
+   SUBROUTINE dolph(deltat, taus, m, window)
+
+!     calculation of dolph-chebyshev window or, for short,
+!     dolph window, using the expression in the reference:
+!
+!     antoniou, andreas, 1993: digital filters: analysis,
+!     design and applications. mcgraw-hill, inc., 689pp.
+!
+!     the dolph window is optimal in the following sense:
+!     for a given main-lobe width, the stop-band attenuation
+!     is minimal; for a given stop-band level, the main-lobe
+!     width is minimal.
+
+      IMPLICIT NONE
+
+      ! Arguments
+      INTEGER, INTENT(IN)                  ::  m
+      REAL (kind=RKIND), DIMENSION(0:M), INTENT(OUT)    ::  window
+      REAL (kind=RKIND), INTENT(IN)                     :: deltat, taus
+
+      ! local data
+      integer, PARAMETER        :: NMAX = 5000
+      REAL, dimension(0:NMAX)   :: t, w, time
+      real, dimension(0:2*nmax) :: w2
+      INTEGER                   :: NPRPE=0        ! no of pe
+      CHARACTER*80              :: MES
+
+      real    :: pi, thetas, x0, term1, term2, rr, r,db, sum, arg, sumw
+      integer :: n, nm1, i, nt
+      
+      PI = 4*ATAN(1.D0)
+
+      WRITE (0,'(A,F8.2,A,F10.2)') 'In dolph, deltat = ',deltat,' taus = ',taus
+
+      N = 2*M+1
+      NM1 = N-1
+
+      THETAS = 2*PI*ABS(DELTAT/TAUS)
+      X0 = 1/COS(THETAS/2)
+      TERM1 = (X0 + SQRT(X0**2-1))**(FLOAT(NM1))
+      TERM2 = (X0 - SQRT(X0**2-1))**(FLOAT(NM1))
+      RR = 0.5*(TERM1+TERM2)
+      R = 1/RR
+      DB = 20*LOG10(R)
+
+      WRITE (0,'(A,2I8)') 'In dolph: M,N = ', M,N
+      WRITE (0,'(A,F10.3)') 'In dolph: THETAS (STOP-BAND EDGE) = ', thetas
+      WRITE (0,'(A,2F10.3)') 'In dolph: R,DB = ', R,DB
+
+      DO NT=0,M
+         SUM = 1
+         DO I=1,M
+            ARG = X0*COS(I*PI/N)
+            CALL CHEBY(T,NM1,ARG)
+            TERM1 = T(NM1)
+            TERM2 = COS(2*NT*PI*I/N)
+            SUM = SUM + R*2*TERM1*TERM2
+         ENDDO
+         W(NT) = SUM/N
+         TIME(NT) = NT
+         WRITE (0,'(A,F10.6,2x,E17.7)') 'In dolph: TIME, W = ', TIME(NT), W(NT)
+      ENDDO
+!     fill in the negative-time values by symmetry.
+      DO NT=0,M
+         W2(M+NT) = W(NT)
+         W2(M-NT) = W(NT)
+      ENDDO
+
+!     fill up the array for return
+      SUMW = 0.
+      DO NT=0,2*M
+         SUMW = SUMW + W2(NT)
+      ENDDO
+      WRITE (0,'(A,F10.4)') 'In dolph: SUM OF WEIGHTS W2 = ', sumw
+
+      DO NT=0,M
+         WINDOW(NT) = W2(NT)
+      ENDDO
+
+      RETURN
+
+   END SUBROUTINE dolph
+
+
+   SUBROUTINE cheby(t, n, x)
+
+!     calculate all chebyshev polynomials up to order n
+!     for the argument value x.
+
+!     reference: numerical recipes, page 184, recurrence
+!         t_n(x) = 2xt_{n-1}(x) - t_{n-2}(x) ,  n>=2.
+
+      IMPLICIT NONE
+
+      ! Arguments
+      INTEGER, INTENT(IN)  :: n
+      REAL, INTENT(IN)     :: x
+      REAL, DIMENSION(0:N) :: t
+ 
+      integer  :: nn
+
+      T(0) = 1
+      T(1) = X
+      IF(N.LT.2) RETURN
+      DO NN=2,N
+         T(NN) = 2*X*T(NN-1) - T(NN-2)
+      ENDDO
+
+      RETURN
+
+   END SUBROUTINE cheby
+
 
 end module atm_core

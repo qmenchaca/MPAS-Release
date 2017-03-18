@@ -327,6 +327,20 @@ module mpas_subdriver
    end subroutine mpas_run
 
 
+   subroutine mpas_dfi()
+
+      implicit none
+
+      integer :: iErr
+
+      iErr = domain_ptr % core % core_dfi(domain_ptr)
+      if ( iErr /= 0 ) then
+         call mpas_dmpar_global_abort('ERROR: Core filter failed for core ' // trim(domain_ptr % core % coreName))
+      end if
+
+   end subroutine mpas_dfi
+
+
    subroutine mpas_finalize()
 
       use mpas_stream_manager, only : MPAS_stream_mgr_finalize
